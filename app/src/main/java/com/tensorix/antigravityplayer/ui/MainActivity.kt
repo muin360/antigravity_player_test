@@ -1,6 +1,8 @@
 package com.tensorix.antigravityplayer.ui
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -8,6 +10,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import com.tensorix.antigravityplayer.audio.VendorDacManager
+import com.tensorix.antigravityplayer.audio.VivoHiFiPermissionManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -41,6 +45,7 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -103,8 +108,54 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             AntigravityTheme {
+                var showHiFiDialog by remember { mutableStateOf(false) }
+                val prefs = remember { getSharedPreferences("antigravity_prefs", Context.MODE_PRIVATE) }
+                
+                LaunchedEffect(Unit) {
+                    if (VivoHiFiPermissionManager.isVivoDevice() && 
+                        !VivoHiFiPermissionManager.hasWriteSettingsPermission(this@MainActivity) &&
+                        !prefs.getBoolean("hifi_permission_requested", false)) {
+                        showHiFiDialog = true
+                    }
+                }
+
+                if (showHiFiDialog) {
+                    AlertDialog(
+                        onDismissRequest = { 
+                            showHiFiDialog = false 
+                            prefs.edit().putBoolean("hifi_permission_requested", true).apply()
+                        },
+                        title = { Text("Enable Hi-Fi Audio") },
+                        text = { Text("Antigravity Player needs one-time permission to activate your device's dedicated Hi-Fi DAC chip for the best audio quality. Tap Allow to enable.") },
+                        confirmButton = {
+                            Button(onClick = {
+                                showHiFiDialog = false
+                                prefs.edit().putBoolean("hifi_permission_requested", true).apply()
+                                VivoHiFiPermissionManager.requestWriteSettingsPermission(this@MainActivity)
+                            }) {
+                                Text("Allow")
+                            }
+                        },
+                        dismissButton = {
+                            Button(onClick = {
+                                showHiFiDialog = false
+                                prefs.edit().putBoolean("hifi_permission_requested", true).apply()
+                            }) {
+                                Text("Skip")
+                            }
+                        }
+                    )
+                }
+
                 MainAppScreen(viewModel = viewModel)
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (VivoHiFiPermissionManager.isVivoDevice() && VivoHiFiPermissionManager.hasWriteSettingsPermission(this)) {
+            VendorDacManager.activateHardwareDac(this)
         }
     }
 

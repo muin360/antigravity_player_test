@@ -158,23 +158,20 @@ object VendorDacManager {
     }
 
     private fun activateVivoHiFi(context: Context): Boolean {
-        // Permission check ছাড়া Settings.System.putString() crash করতে পারে
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if (!Settings.System.canWrite(context)) {
-                // User-কে permission দিতে বলো, silent crash না করে
-                Log.w("VendorDacManager", "WRITE_SETTINGS permission নেই। " +
-                    "Vivo Settings → Sound & Vibration → Hi-Fi থেকে manually enable করুন।")
-                return false
+        if (!Settings.System.canWrite(context)) return false
+        return try {
+            val current = Settings.System.getString(context.contentResolver, "vivo_hifi_music_app_list") ?: ""
+            if (!current.contains(context.packageName)) {
+                Settings.System.putString(
+                    context.contentResolver,
+                    "vivo_hifi_music_app_list",
+                    if (current.isEmpty()) context.packageName else "$current,${context.packageName}"
+                )
             }
-        }
-        return runCatching {
-            Settings.System.putString(
-                context.contentResolver,
-                "vivo_hifi_music_app_list",
-                context.packageName
-            )
             true
-        }.getOrDefault(false)
+        } catch (e: SecurityException) {
+            false
+        }
     }
 
     private fun activateLgQuadDac(context: Context) {

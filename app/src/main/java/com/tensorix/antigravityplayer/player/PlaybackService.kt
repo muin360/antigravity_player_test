@@ -549,11 +549,15 @@ class PlaybackService : MediaSessionService() {
         if (currentSessionId != 0) {
             if (!_bitPerfectMode.value) {
                 // DSP mode: AudioEffect session register করো, Vivo Hi-Fi trigger করার জন্য
-                val intent = Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
-                    putExtra(AudioEffect.EXTRA_AUDIO_SESSION, currentSessionId)
-                    putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
+                serviceScope.launch {
+                    delay(300)
+                    val intent = Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
+                        putExtra(AudioEffect.EXTRA_AUDIO_SESSION, currentSessionId)
+                        putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
+                        putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
+                    }
+                    runCatching { sendBroadcast(intent) }
                 }
-                runCatching { sendBroadcast(intent) }
                 equalizerEngine?.attachToAudioSession(currentSessionId)
             } else {
                 // Bit-perfect mode: AudioEffect release করো যাতে AudioPolicy hook না করে
@@ -568,6 +572,15 @@ class PlaybackService : MediaSessionService() {
                     vivoAudioLayer?.onAudioSessionOpened(audioSessionId)
                     universalVendorManager?.onAudioSessionActive(audioSessionId)
                     if (!_bitPerfectMode.value) {
+                        serviceScope.launch {
+                            delay(300)
+                            val intent = Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
+                                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, audioSessionId)
+                                putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
+                                putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
+                            }
+                            runCatching { sendBroadcast(intent) }
+                        }
                         equalizerEngine?.attachToAudioSession(audioSessionId)
                     } else {
                         equalizerEngine?.release()
