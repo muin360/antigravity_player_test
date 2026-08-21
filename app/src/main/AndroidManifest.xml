@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Phase 1: read device audio & notifications -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
@@ -22,6 +23,15 @@
 
     <!-- Phase 4: voice commands -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Required for Bluetooth Hi-Fi detection -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- Required for writing Vivo/OEM Hi-Fi settings (optional, shows instructions if missing) -->
+    <uses-permission
+        android:name="android.permission.WRITE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
 
     <application
         android:name=".AntigravityApp"

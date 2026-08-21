@@ -1,7 +1,13 @@
 package com.tensorix.antigravityplayer.player
 
+import android.bluetooth.BluetoothA2dp
+import android.bluetooth.BluetoothProfile
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioManager
+import android.media.audiofx.AudioEffect
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -94,6 +100,71 @@ class PlaybackService : MediaSessionService() {
     private var configJob: Job? = null
     private var volumeReceiver: android.content.BroadcastReceiver? = null
     private var bitPerfectReceiver: android.content.BroadcastReceiver? = null
+
+    private val audioOutputReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_HEADSET_PLUG -> {
+                    // Wired headset (3.5mm jack) - same as AudioManager.ACTION_HEADSET_PLUG
+                    val state = intent.getIntExtra("state", 0)
+                    val hasHeadset = state == 1
+                    Log.d("HiFi", "Wired headset: $hasHeadset")
+                    handleAudioOutputChanged(hasHeadset)
+                }
+                BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED -> {
+                    // Bluetooth A2DP headphone/speaker connected
+                    val state = intent.getIntExtra(BluetoothProfile.EXTRA_STATE, BluetoothProfile.STATE_DISCONNECTED)
+                    val connected = state == BluetoothProfile.STATE_CONNECTED
+                    Log.d("HiFi", "Bluetooth A2DP: $connected")
+                    handleAudioOutputChanged(connected)
+                }
+                AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED -> {
+                    // Bluetooth SCO (headset with mic)
+                    val state = intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, AudioManager.SCO_AUDIO_STATE_DISCONNECTED)
+                    val connected = state == AudioManager.SCO_AUDIO_STATE_CONNECTED
+                    handleAudioOutputChanged(connected)
+                }
+            }
+        }
+    }
+
+    private fun handleAudioOutputChanged(externalOutputConnected: Boolean) {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        // Cross-check actual routing — works on all Android versions
+        val isWiredConnected = audioManager.isWiredHeadsetOn
+        @Suppress("DEPRECATION")
+        val isBluetoothConnected = audioManager.isBluetoothA2dpOn || audioManager.isBluetoothScoOn
+
+        val shouldEnableHiFi = externalOutputConnected || isWiredConnected || isBluetoothConnected
+
+        Log.d("HiFi", "Output changed → wired=$isWiredConnected, bt=$isBluetoothConnected → hifi=$shouldEnableHiFi")
+
+        if (_hiFiEnabled.value != shouldEnableHiFi) {
+            _hiFiEnabled.value = shouldEnableHiFi
+            audioPrefs.edit { putBoolean("hi_fi_enabled", shouldEnableHiFi) }
+            // Rebuild ExoPlayer with updated AudioSink settings
+            reloadAudioPipeline()
+        }
+    }
+
+    private fun registerAudioOutputReceiver() {
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_HEADSET_PLUG)
+            addAction(AudioManager.ACTION_HEADSET_PLUG)
+            addAction(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
+            addAction(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(audioOutputReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(audioOutputReceiver, filter)
+        }
+    }
+
+    private fun unregisterAudioOutputReceiver() {
+        runCatching { unregisterReceiver(audioOutputReceiver) }
+    }
 
     private val _hiFiEnabled = MutableStateFlow(true)
     val hiFiEnabled: StateFlow<Boolean> = _hiFiEnabled.asStateFlow()
@@ -322,10 +393,10 @@ class PlaybackService : MediaSessionService() {
             .setUsage(C.USAGE_MEDIA)
             .apply {
                 if (_hiFiEnabled.value) {
-                    // Include hardware low-latency hints (0x100 for API 26+) where supported
-                    val lowLatencyFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) 0x100 else 0
+                    // FLAG_LOW_LATENCY (0x100) is the correct Java framework flag that encourages
+                    // AudioPolicyManager to select a lower-latency, potentially direct output.
                     @Suppress("WrongConstant")
-                    setFlags(C.FLAG_AUDIBILITY_ENFORCED or lowLatencyFlag)
+                    setFlags(0x100)
                 }
             }
             .setAllowedCapturePolicy(C.ALLOW_CAPTURE_BY_NONE) // Direct hardware path
@@ -367,13 +438,14 @@ class PlaybackService : MediaSessionService() {
                     dspProcessor.ditherStrength = if (currentConfig.ditherEnabled) 1.0 else 0.0
                     dspProcessor.outputBitDepth = currentConfig.bitDepth
                     
+                    val activeProcessors = if (_hiFiEnabled.value || isBitPerfect) emptyArray() else arrayOf(dspProcessor)
                     val builder = DefaultAudioSink.Builder(context)
-                        .setAudioProcessors(if (isBitPerfect) emptyArray() else arrayOf(dspProcessor))
+                        .setAudioProcessors(activeProcessors)
                     
                     // FORCED HI-FI ARCHITECTURE:
-                    // We attempt to enable Float output for DSP mode to maintain 64-bit precision.
-                    // For Bit-Perfect, we prefer Integer to hit Direct PCM mixPorts.
-                    val shouldEnableFloat = !isBitPerfect && isHiFiSupported()
+                    // Integer PCM (16/24/32-bit) must be used for direct audio path.
+                    // Float output disabled in Hi-Fi mode — direct_pcm HAL port does not support PCM_FLOAT
+                    val shouldEnableFloat = !isBitPerfect && !_hiFiEnabled.value && isHiFiSupported()
                     builder.setEnableFloatOutput(shouldEnableFloat)
 
                     // Apply Buffer Multiplier & Alignment
@@ -453,6 +525,17 @@ class PlaybackService : MediaSessionService() {
                 equalizerEngine?.attachToAudioSession(currentSessionId)
             } else {
                 equalizerEngine?.release()
+            }
+
+            // Do NOT send this broadcast in Hi-Fi/Direct mode.
+            // Any OEM effect daemon that receives this will attach an EffectChain to the session,
+            // permanently disqualifying it from DirectOutputThread.
+            if (!_hiFiEnabled.value) {
+                val intent = Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
+                    putExtra(AudioEffect.EXTRA_AUDIO_SESSION, currentSessionId)
+                    putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
+                }
+                runCatching { sendBroadcast(intent) }
             }
         }
         logRuntimeAudioDiagnostics(currentSessionId, audioAttributes)
@@ -561,6 +644,7 @@ class PlaybackService : MediaSessionService() {
         player = exoPlayer
         mediaSession = MediaSession.Builder(this, exoPlayer).build()
         refreshAudiophileState()
+        registerAudioOutputReceiver()
     }
 
     private fun showPlaybackNotification(title: String, text: String) {
@@ -706,6 +790,7 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        unregisterAudioOutputReceiver()
         configJob?.cancel()
         serviceScope.coroutineContext[Job]?.cancel()
 
