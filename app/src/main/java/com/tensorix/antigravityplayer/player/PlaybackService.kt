@@ -53,6 +53,7 @@ import kotlinx.coroutines.flow.asStateFlow
  *  - Dynamic Hardware Sample Rate Matching (44.1kHz, 48kHz, 88.2kHz, 96kHz, 176.4kHz, 192kHz)
  *  - Bit-Perfect DSP Bypass switch for studio-master audio clarity
  *  - Integrated AudioOutputManager for USB DAC detection, hotplug routing, and AudioFlinger diagnostics
+ *  - Hardened for Vivo Hi-Fi DAC auto-activation and system DSP suppression
  */
 @UnstableApi
 class PlaybackService : MediaSessionService() {
