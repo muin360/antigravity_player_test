@@ -44,8 +44,9 @@ class UniversalHardwareDetector(private val context: Context) {
         val dacArchitecture: String,
         val maxSampleRateHz: Int,
         val maxBitDepth: Int,
-        val snrDb: Double,
-        val thdPlusNDb: Double
+        val snrDb: Double = 0.0,
+        val thdPlusNDb: Double = 0.0,
+        val confidence: Confidence = Confidence.INFERRED
     )
 
     data class PlatformCapabilitiesSnapshot(
@@ -164,17 +165,17 @@ class UniversalHardwareDetector(private val context: Context) {
 
     /**
      * Identifies the hardware DAC based on device board, SoC, and verified hardware topology.
+     * REMOVED: Fabricated SNR/THD+N metrics.
      */
     fun detectDacHardware(outputDevice: OutputDeviceSnapshot): DacHardwareSnapshot {
         if (outputDevice.isUsb) {
             return DacHardwareSnapshot(
-                dacModelName = "External USB Audio Class 2.0 DAC",
-                dacManufacturer = "Asynchronous USB Audio Interface",
-                dacArchitecture = "Bit-Exact Direct Hardware Framing",
-                maxSampleRateHz = 384000,
-                maxBitDepth = 32,
-                snrDb = 125.0,
-                thdPlusNDb = -118.0
+                dacModelName = "External USB Audio DAC",
+                dacManufacturer = "USB Audio Class 2.0",
+                dacArchitecture = "Asynchronous Direct Path",
+                maxSampleRateHz = outputDevice.supportedSampleRates.maxOrNull() ?: 0,
+                maxBitDepth = 32, // Typical for UAC2
+                confidence = Confidence.HIGH_CONFIDENCE
             )
         }
 
@@ -188,23 +189,21 @@ class UniversalHardwareDetector(private val context: Context) {
         if (manufacturer.contains("vivo") || brand.contains("vivo") || brand.contains("iqoo") || model.contains("x21")) {
             return if (model.contains("x21") || hardware.contains("sdm660") || board.contains("sdm660")) {
                 DacHardwareSnapshot(
-                    dacModelName = "Asahi Kasei AK4376A 32-bit DAC",
-                    dacManufacturer = "Asahi Kasei Microdevices (AKM)",
-                    dacArchitecture = "VELVET SOUND™ 32-bit Architecture with Headphone Amp",
+                    dacModelName = "Asahi Kasei AK4376A (Potential)",
+                    dacManufacturer = "AKM",
+                    dacArchitecture = "32-bit DAC with Headphone Amp",
                     maxSampleRateHz = 384000,
                     maxBitDepth = 32,
-                    snrDb = 125.0,
-                    thdPlusNDb = -107.0
+                    confidence = Confidence.INFERRED
                 )
             } else {
                 DacHardwareSnapshot(
-                    dacModelName = "Vivo Hi-Fi Hardware DAC (AKM/Cirrus)",
-                    dacManufacturer = "Vivo Electronics / OEM DAC",
-                    dacArchitecture = "Discrete Hi-Fi Stereo DAC Path",
+                    dacModelName = "Vivo Hi-Fi Hardware (Potential)",
+                    dacManufacturer = "Vivo Electronics",
+                    dacArchitecture = "Discrete DAC Path",
                     maxSampleRateHz = 192000,
                     maxBitDepth = 24,
-                    snrDb = 120.0,
-                    thdPlusNDb = -102.0
+                    confidence = Confidence.INFERRED
                 )
             }
         }
@@ -212,51 +211,47 @@ class UniversalHardwareDetector(private val context: Context) {
         // 2. LG Quad DAC (ESS Sabre ES9218P)
         if (manufacturer.contains("lge") || brand.contains("lge") || model.startsWith("lm-") || model.startsWith("lg-")) {
             return DacHardwareSnapshot(
-                dacModelName = "ESS Sabre ES9218P Quad DAC",
+                dacModelName = "ESS Sabre Quad DAC (Potential)",
                 dacManufacturer = "ESS Technology, Inc.",
-                dacArchitecture = "32-bit 4-Channel Parallel HyperStream® II DAC",
+                dacArchitecture = "32-bit Parallel HyperStream® II",
                 maxSampleRateHz = 384000,
                 maxBitDepth = 32,
-                snrDb = 130.0,
-                thdPlusNDb = -115.0
+                confidence = Confidence.INFERRED
             )
         }
 
         // 3. Samsung UHQ 32-bit Float Engine
         if (manufacturer.contains("samsung")) {
             return DacHardwareSnapshot(
-                dacModelName = "Samsung SoundAlive UHQ 32-bit DAC",
-                dacManufacturer = "Samsung Electronics Co., Ltd.",
-                dacArchitecture = "Ultra High Quality 32-bit Float Audio Engine",
+                dacModelName = "Samsung SoundAlive Engine (Software)",
+                dacManufacturer = "Samsung Electronics",
+                dacArchitecture = "Ultra High Quality 32-bit Float",
                 maxSampleRateHz = 192000,
                 maxBitDepth = 32,
-                snrDb = 118.0,
-                thdPlusNDb = -100.0
+                confidence = Confidence.INFERRED
             )
         }
 
         // 4. Sony Xperia Hi-Res Audio
         if (manufacturer.contains("sony")) {
             return DacHardwareSnapshot(
-                dacModelName = "Sony S-Master HX / DSEE Engine",
+                dacModelName = "Sony S-Master HX (Potential)",
                 dacManufacturer = "Sony Corporation",
-                dacArchitecture = "High-Resolution Audio S-Master HX Architecture",
+                dacArchitecture = "High-Resolution Audio Architecture",
                 maxSampleRateHz = 192000,
                 maxBitDepth = 24,
-                snrDb = 120.0,
-                thdPlusNDb = -104.0
+                confidence = Confidence.INFERRED
             )
         }
 
         // 5. Default Qualcomm Aqstic / Platform PMIC Codec
         return DacHardwareSnapshot(
-            dacModelName = "Qualcomm Aqstic / Integrated Codec",
-            dacManufacturer = "Qualcomm Technologies, Inc.",
-            dacArchitecture = "Integrated Low-Power PMIC Audio Codec",
-            maxSampleRateHz = 192000,
+            dacModelName = "Standard Platform Codec",
+            dacManufacturer = "Qualcomm / Generic HAL",
+            dacArchitecture = "Integrated SoC Audio Path",
+            maxSampleRateHz = 48000,
             maxBitDepth = 24,
-            snrDb = 109.0,
-            thdPlusNDb = -95.0
+            confidence = Confidence.UNKNOWN
         )
     }
 

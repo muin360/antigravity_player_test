@@ -27,12 +27,14 @@ import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.tensorix.antigravityplayer.audio.AudioEngineController
 import com.tensorix.antigravityplayer.audio.AudioOutputApi
 import com.tensorix.antigravityplayer.audio.AudioOutputConfigManager
 import com.tensorix.antigravityplayer.audio.AudioOutputManager
 import com.tensorix.antigravityplayer.audio.AudioOutputRouteType
 import com.tensorix.antigravityplayer.audio.AudioTrackInfo
 import com.tensorix.antigravityplayer.audio.AudiophilePlaybackSnapshot
+import com.tensorix.antigravityplayer.audio.CanonicalAudioRuntimeSnapshot
 import com.tensorix.antigravityplayer.audio.OutputDeviceConfig
 import com.tensorix.antigravityplayer.audio.VendorDacManager
 import kotlinx.coroutines.CoroutineScope
@@ -416,7 +418,14 @@ class PlaybackService : MediaSessionService() {
                     }
 
                     dspProcessor.isTurboMode = _hiFiEnabled.value
-                    dspProcessor.ditherStrength = if (currentConfig.ditherEnabled) 1.0 else 0.0
+                    
+                    if (isBitPerfect) {
+                        dspProcessor.ditherStrength = 0.0
+                        dspProcessor.dvcVolume = 1.0
+                    } else {
+                        dspProcessor.ditherStrength = if (currentConfig.ditherEnabled) 1.0 else 0.0
+                    }
+                    
                     dspProcessor.outputBitDepth = currentConfig.bitDepth
 
                     val builder = DefaultAudioSink.Builder(context)
@@ -667,15 +676,15 @@ class PlaybackService : MediaSessionService() {
         useAlbumGain: Boolean = false
     ) {
         VendorDacManager.activateHardwareDac(applicationContext)
-        val resolvedSampleRate = if (sampleRateHz > 0) sampleRateHz else 44100
-        val resolvedBitDepth = if (bitDepth > 0) bitDepth else 16
+        val resolvedSampleRate = if (sampleRateHz > 0) sampleRateHz else 0 // 0 means unknown
+        val resolvedBitDepth = if (bitDepth > 0) bitDepth else 0
         val isHiResSource = (resolvedBitDepth >= 24) || (resolvedSampleRate >= 88200)
-        val cleanCodec = codec.ifBlank { "FLAC / Lossless PCM" }
+        val cleanCodec = codec.ifBlank { "Unknown Codec" }
         val info = AudioTrackInfo(
             title = title,
             artist = artist,
             codec = cleanCodec,
-            bitrateKbps = if (bitrateKbps > 0) bitrateKbps else 320,
+            bitrateKbps = bitrateKbps,
             bitDepth = resolvedBitDepth,
             sampleRateHz = resolvedSampleRate,
             channels = channels,
@@ -699,8 +708,9 @@ class PlaybackService : MediaSessionService() {
         _audiophileSnapshot.value = snapshot
         _hiFiSupportedState.value = snapshot.output.activeRoute != null
 
-        snapshot.output.runtimeSnapshot?.let { 
-            HiFiBadgeState.updateFromSnapshot(it)
+        snapshot.output.canonicalSnapshot?.let { canon ->
+            HiFiBadgeState.updateFromSnapshot(canon)
+            AudioEngineController.updateSnapshot(applicationContext, trackInfo, isDspActive)
         }
         
         // Auto-switch profile and Listening Mode based on dynamic route engine

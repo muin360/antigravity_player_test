@@ -14,23 +14,23 @@ object HiFiBadgeState {
     private val _hifiDetail = MutableStateFlow("")
     val hifiDetail: StateFlow<String> = _hifiDetail.asStateFlow()
 
-    fun updateFromSnapshot(snapshot: AudioRuntimeSnapshot) {
-        _isHiFiActive.value = snapshot.bitPerfectState == BitPerfectState.VERIFIED ||
-                snapshot.bitPerfectState == BitPerfectState.ACTIVE_UNVERIFIED ||
-                snapshot.bitPerfectState == BitPerfectState.ELIGIBLE
+    fun updateFromSnapshot(snapshot: CanonicalAudioRuntimeSnapshot) {
+        _isHiFiActive.value = snapshot.bitPerfect.state == BitPerfectState.VERIFIED ||
+                snapshot.bitPerfect.state == BitPerfectState.ACTIVE_UNVERIFIED ||
+                snapshot.bitPerfect.state == BitPerfectState.ELIGIBLE
 
-        _hifiLabel.value = when (snapshot.bitPerfectState) {
+        _hifiLabel.value = when (snapshot.bitPerfect.state) {
             BitPerfectState.VERIFIED -> "BIT-PERFECT"
             BitPerfectState.ACTIVE_UNVERIFIED -> "DIRECT"
             BitPerfectState.ELIGIBLE -> "HI-RES"
-            else -> if (snapshot.actualOutputFormat.sampleRate.value >= 88200) "HD" else "HI-FI"
+            else -> if (snapshot.actualOutput.sampleRate.value >= 88200) "HD" else "HI-FI"
         }
 
-        _hifiDetail.value = when (snapshot.bitPerfectState) {
+        _hifiDetail.value = when (snapshot.bitPerfect.state) {
             BitPerfectState.VERIFIED -> "Verified Direct Path"
             BitPerfectState.ACTIVE_UNVERIFIED -> "Exclusive Mode"
             BitPerfectState.ELIGIBLE -> "DSP Engine Active"
-            else -> "${snapshot.activeRoute.value.displayName}"
+            else -> snapshot.activeRoute.value.displayName
         }
     }
 

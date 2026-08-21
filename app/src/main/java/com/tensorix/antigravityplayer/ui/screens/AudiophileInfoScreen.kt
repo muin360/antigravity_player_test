@@ -139,6 +139,8 @@ fun AudiophileInfoScreen(
             isDspBypassed = isBitPerfectMode
         )
     }
+    
+    val snapshotData = output.canonicalSnapshot
 
     Column(
         modifier = contentModifier
@@ -157,12 +159,27 @@ fun AudiophileInfoScreen(
                     fontSize = 20.sp,
                     letterSpacing = 1.sp
                 )
-                Text(
-                    text = hardwareReport.activeDacName,
-                    color = PrimaryCyan.copy(alpha = 0.8f),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+                snapshot.output.canonicalSnapshot?.let { canon ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = canon.dac.modelName.value,
+                            color = PrimaryCyan.copy(alpha = 0.8f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        if (canon.dac.confidence != Confidence.VERIFIED) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color.Gray.copy(alpha = 0.2f))
+                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                            ) {
+                                Text(canon.dac.confidence.name, color = Color.Gray, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
             }
 
             Button(
@@ -346,8 +363,8 @@ fun AudiophileInfoScreen(
                     // Node 5: Hardware DAC
                     SignalChainNode(
                         title = "5. Hardware DAC & Amp",
-                        details = "${hardwareReport.activeDacName} (${if (hardwareReport.isVendorHiFiActive) "Dedicated Hi-Fi Hardware Rail" else "Integrated Audio HAL"})",
-                        badge = "HARDWARE DAC",
+                        details = snapshotData?.dac?.modelName?.value ?: hardwareReport.activeDacName,
+                        badge = snapshotData?.dac?.confidence?.name ?: "HARDWARE DAC",
                         badgeColor = Color(0xFF7C4DFF)
                     )
                 }
@@ -375,7 +392,7 @@ fun AudiophileInfoScreen(
         Spacer(modifier = Modifier.height(20.dp))
 
         // MODULE 15: Structured Evidence Log
-        val snapshotData = output.runtimeSnapshot
+        val snapshotData = output.canonicalSnapshot
         if (snapshotData != null) {
             Text(
                 text = "TECHNICAL EVIDENCE LOG",
@@ -395,15 +412,15 @@ fun AudiophileInfoScreen(
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = Color.White.copy(alpha = 0.05f))
                     EvidenceItem("Sharing Mode", snapshotData.sharingMode)
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = Color.White.copy(alpha = 0.05f))
-                    EvidenceItem("Source Sample Rate", snapshotData.sourceFormat.sampleRate)
+                    EvidenceItem("Source Sample Rate", snapshotData.source.sampleRate)
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = Color.White.copy(alpha = 0.05f))
-                    EvidenceItem("Actual Output Rate", snapshotData.actualOutputFormat.sampleRate)
+                    EvidenceItem("Actual Output Rate", snapshotData.actualOutput.sampleRate)
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = Color.White.copy(alpha = 0.05f))
-                    EvidenceItem("Direct Path Active", snapshotData.directPlaybackActive)
+                    EvidenceItem("Direct Path Active", snapshotData.directPathActive)
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = Color.White.copy(alpha = 0.05f))
                     EvidenceItem("DSP Status", snapshotData.dspState)
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = Color.White.copy(alpha = 0.05f))
-                    EvidenceItem("Bit-Perfect Verification", AudioEvidence(snapshotData.bitPerfectState.name, EvidenceSource.HEURISTIC, if (snapshotData.bitPerfectState == BitPerfectState.VERIFIED) Confidence.VERIFIED else Confidence.INFERRED))
+                    EvidenceItem("Bit-Perfect Verification", AudioEvidence(snapshotData.bitPerfect.state.name, EvidenceSource.HEURISTIC, if (snapshotData.bitPerfect.state == BitPerfectState.VERIFIED) Confidence.VERIFIED else Confidence.INFERRED))
                 }
             }
             Spacer(modifier = Modifier.height(20.dp))

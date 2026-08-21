@@ -136,6 +136,50 @@ data class AudioRouteCapability(
     val canBeExclusive: Boolean = false
 )
 
+data class CanonicalAudioRuntimeSnapshot(
+    val timestamp: Long = System.currentTimeMillis(),
+
+    val source: AudioFormatSnapshot,
+    val decoder: AudioFormatSnapshot,
+    val processing: AudioFormatSnapshot,
+
+    val requestedOutput: AudioFormatSnapshot,
+    val actualOutput: AudioFormatSnapshot,
+
+    val activeRoute: AudioEvidence<AudioOutputRouteType>,
+    val audioApi: AudioEvidence<AudioOutputApi>,
+    val sharingMode: AudioEvidence<String>, // EXCLUSIVE / SHARED
+    val performanceMode: AudioEvidence<String>,
+
+    val directPathActive: AudioEvidence<Boolean>,
+    val mixerPathActive: AudioEvidence<Boolean>,
+    val resamplerState: AudioEvidence<String>, // OFF / ACTIVE / BYPASS
+    val dspState: AudioEvidence<String>, // OFF / ACTIVE / BYPASS
+
+    val dac: DacRuntimeState,
+
+    val bitPerfect: BitPerfectRuntimeState,
+
+    val confidence: Confidence,
+    val limitations: List<String>
+)
+
+data class DacRuntimeState(
+    val modelName: AudioEvidence<String>,
+    val vendor: AudioEvidence<String>,
+    val isActive: AudioEvidence<Boolean>,
+    val maxSampleRate: AudioEvidence<Int>,
+    val maxBitDepth: AudioEvidence<Int>,
+    val confidence: Confidence
+)
+
+data class BitPerfectRuntimeState(
+    val state: BitPerfectState,
+    val eligibility: Boolean,
+    val evidence: String,
+    val confidence: Confidence
+)
+
 data class AudioOutputState(
     val activeRoute: AudioRouteCapability? = null,
     val availableRoutes: List<AudioRouteCapability> = emptyList(),
@@ -149,7 +193,8 @@ data class AudioOutputState(
     val signalPathStages: List<SignalPathStage> = emptyList(),
     val deviceLimitations: List<String> = emptyList(),
     val latencyMs: Int = 0,
-    val runtimeSnapshot: AudioRuntimeSnapshot? = null
+    val runtimeSnapshot: AudioRuntimeSnapshot? = null,
+    val canonicalSnapshot: CanonicalAudioRuntimeSnapshot? = null
 )
 
 data class AudioQualityState(

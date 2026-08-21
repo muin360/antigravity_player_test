@@ -176,7 +176,9 @@ object HardwareHiFiVerifier {
         try {
             audioManager?.let { am ->
                 val keys = listOf("direct_pcm", "qcom_direct_pcm", "audio_stream_direct")
-                val values = keys.associateWith { key -> runCatching { am.getParameters(key) }.getOrDefault("") }
+                val values = keys.associateWith { key -> 
+                    try { am.getParameters(key) ?: "" } catch (e: Exception) { "" }
+                }
                 isDirectActive = values.values.any { it.contains("=1") || it.contains("=true", true) || it.contains("on", true) }
                 if (isDirectActive) {
                     details.add("Direct PCM HAL parameter confirmed active via AudioManager")

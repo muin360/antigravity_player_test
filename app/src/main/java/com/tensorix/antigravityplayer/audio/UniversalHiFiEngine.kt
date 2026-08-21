@@ -3,6 +3,8 @@ package com.tensorix.antigravityplayer.audio
 import android.content.Context
 import android.util.Log
 
+import androidx.media3.common.util.UnstableApi
+
 /**
  * Universal Hi-Fi State Model (Strictly Empirical / Zero Fake Claims)
  */
@@ -39,6 +41,7 @@ class UniversalHiFiEngine(private val context: Context) {
         val troubleshootingSummary: String
     )
 
+    @UnstableApi
     fun evaluate(
         isPlaying: Boolean,
         audioSessionId: Int,
@@ -49,39 +52,33 @@ class UniversalHiFiEngine(private val context: Context) {
         val device = hardwareDetector.detectActiveOutputDevice()
         val dac = hardwareDetector.detectDacHardware(device)
         val platform = hardwareDetector.detectPlatformCapabilities(device)
+        
+        val canon = AudioEngineController.snapshot.value
 
         val limitations = mutableListOf<String>()
 
         val state = when {
-            // Case 1: USB DAC connected in Bit-Perfect mode
-            device.isUsb && isBitPerfectRequested -> {
-                UniversalHiFiState.USB_BIT_PERFECT
+            // Case 1: Bit-Perfect VERIFIED (Strongest proof)
+            canon?.bitPerfect?.state == BitPerfectState.VERIFIED -> {
+                if (device.isUsb) UniversalHiFiState.USB_BIT_PERFECT else UniversalHiFiState.BIT_PERFECT
             }
-            // Case 2: USB DAC connected in standard mode
-            device.isUsb -> {
-                UniversalHiFiState.ACTIVE
-            }
-            // Case 3: Internal Bit-Perfect mode (Zero DSP, Zero Effects, Integer PCM)
-            isBitPerfectRequested && device.isWired && isPlaying -> {
+            // Case 2: Bit-Perfect Active but unverified
+            canon?.bitPerfect?.state == BitPerfectState.ACTIVE_UNVERIFIED -> {
                 UniversalHiFiState.BIT_PERFECT
             }
-            // Case 4: Internal Wired Headphone path with dedicated DAC hardware active
-            device.isWired && isPlaying && audioSessionId != 0 -> {
+            // Case 3: Hi-Fi Hardware Active (Direct Path)
+            canon?.directPathActive?.value == true && isPlaying -> {
                 UniversalHiFiState.ACTIVE
             }
-            // Case 5: Wired Headphone connected but playback idle
-            device.isWired -> {
-                UniversalHiFiState.AVAILABLE
+            // Case 4: Hardware available but idle or shared
+            device.isWired || device.isUsb -> {
+                if (isPlaying) UniversalHiFiState.ACTIVE else UniversalHiFiState.AVAILABLE
             }
-            // Case 6: Bluetooth High-Res Audio (LDAC / aptX HD)
+            // Case 5: Bluetooth High-Res Audio
             device.isBluetooth && (device.bluetoothCodecName.contains("LDAC") || device.bluetoothCodecName.contains("aptX HD") || device.bluetoothCodecName.contains("LHDC")) -> {
                 if (isPlaying) UniversalHiFiState.ACTIVE else UniversalHiFiState.AVAILABLE
             }
-            // Case 7: Built-in speaker or standard Bluetooth
             else -> {
-                if (!device.isWired && !device.isUsb) {
-                    limitations.add("Analog Hi-Fi DAC paths require a 3.5mm wired headset or USB DAC connection")
-                }
                 UniversalHiFiState.UNSUPPORTED
             }
         }

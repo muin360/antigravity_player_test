@@ -238,23 +238,26 @@ class AudioOutputManager(private val context: Context) {
 
         // 2. Build Canonical Runtime Snapshot
         val currentTrack = trackInfo ?: AudioTrackInfo()
-        val runtimeSnapshot = AudioVerificationEngine.buildRuntimeSnapshot(
+        val dsp = com.tensorix.antigravityplayer.player.PlaybackService.instance?.dspProcessor
+        val canonicalSnapshot = AudioVerificationEngine.buildCanonicalSnapshot(
             context = context,
             trackInfo = currentTrack,
             isDspActive = isDspActive,
-            activeRoute = activeRoute
+            activeRoute = activeRoute,
+            dvcVolume = dsp?.dvcVolume ?: 1.0,
+            ditherStrength = dsp?.ditherStrength ?: 0.0
         )
 
-        val sampleRate = runtimeSnapshot.actualOutputFormat.sampleRate.value
-        val bitDepth = runtimeSnapshot.actualOutputFormat.bitDepth.value
-        val limitations = runtimeSnapshot.bitPerfectEvidence.let { if (it.isNotEmpty()) listOf(it) else emptyList() }
+        val sampleRate = canonicalSnapshot.actualOutput.sampleRate.value
+        val bitDepth = canonicalSnapshot.actualOutput.bitDepth.value
+        val limitations = canonicalSnapshot.limitations
         
         // 3. Map Snapshot back to existing UI model for compatibility
-        val bitPerfectState = runtimeSnapshot.bitPerfectState
-        val bitPerfectPossible = runtimeSnapshot.directPlaybackActive.value
+        val bitPerfectState = canonicalSnapshot.bitPerfect.state
+        val bitPerfectPossible = canonicalSnapshot.directPathActive.value
 
         val routeName = activeRoute?.productName ?: activeRoute?.deviceName ?: "System Audio Output"
-        val playbackPath = if (runtimeSnapshot.directPlaybackActive.value) {
+        val playbackPath = if (canonicalSnapshot.directPathActive.value) {
             if (isDspActive) "64-bit Audiophile DSP ➔ Direct Hardware HAL ➔ $routeName"
             else "Direct Bit-Perfect Path ➔ $routeName"
         } else {
@@ -272,11 +275,12 @@ class AudioOutputManager(private val context: Context) {
             playbackPath = playbackPath,
             bitPerfectState = bitPerfectState,
             bitPerfectPossible = bitPerfectPossible,
-            resamplingRequired = runtimeSnapshot.resamplerState.value == "ACTIVE",
+            resamplingRequired = canonicalSnapshot.resamplerState.value == "ACTIVE",
             signalPathStages = signalStages,
             deviceLimitations = limitations,
             latencyMs = 0, // Should be measured at runtime
-            runtimeSnapshot = runtimeSnapshot
+            runtimeSnapshot = null, // Old model removed
+            canonicalSnapshot = canonicalSnapshot
         )
     }
 
