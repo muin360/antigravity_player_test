@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.AntigravityPlayer" parent="android:Theme.Material.NoActionBar" />
+</resources>

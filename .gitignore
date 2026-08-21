@@ -1,0 +1,25 @@
+*.iml
+.gradle/
+/local.properties
+.idea/
+.DS_Store
+build/
+captures
+.externalNativeBuild
+.cxx
+node_modules/
+backend/downloads/
+*.keystore
+*.jks
+
+# Logs and debug files
+*.txt
+*.hprof
+*.log
+logcat*
+
+# Project specific caches and artifacts
+.artifacts/
+.agents/
+.kotlin/
+.memory/

@@ -1,0 +1,15 @@
+{
+  "name": "antigravity-player-backend",
+  "version": "0.1.0",
+  "description": "Phase 3: YouTube search/stream/download backend for Antigravity Player (yt-dlp based).",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "youtube-dl-exec": "^3.0.2",
+    "cors": "^2.8.5"
+  }
+}

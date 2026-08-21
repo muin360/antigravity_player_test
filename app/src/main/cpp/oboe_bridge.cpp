@@ -1,0 +1,418 @@
+#include <jni.h>
+#include <oboe/Oboe.h>
+#include <android/log.h>
+#include <vector>
+#include <memory>
+#include <mutex>
+#include "dsp/audiophile_dsp.h"
+#include "resampler/audiophile_resampler.h"
+#include "dsd/dsd_engine.h"
+
+#define LOG_TAG "OboeBridge"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
+
+class OboeStreamWrapper : public oboe::AudioStreamErrorCallback {
+public:
+    oboe::AudioStream *stream = nullptr;
+    antigravity::AudiophileDsp dsp;
+    antigravity::AudiophileResampler resampler;
+    antigravity::DsdEngine dsd;
+
+    int32_t configuredSampleRate = 48000;
+    int32_t configuredChannelCount = 2;
+    std::vector<float> resampleBuffer;
+    std::mutex streamMutex;
+
+    OboeStreamWrapper() = default;
+    ~OboeStreamWrapper() {
+        close();
+    }
+
+    void close() {
+        std::lock_guard<std::mutex> lock(streamMutex);
+        if (stream) {
+            stream->stop();
+            stream->close();
+            stream = nullptr;
+        }
+    }
+
+
+
+    void onErrorAfterClose(oboe::AudioStream *audioStream, oboe::Result error) override {
+        LOGE("Oboe stream error: %s. Attempting graceful restart.", oboe::convertToText(error));
+        std::lock_guard<std::mutex> lock(streamMutex);
+        if (!stream) return;
+
+        oboe::AudioStreamBuilder builder;
+        builder.setDirection(oboe::Direction::Output)
+               ->setPerformanceMode(oboe::PerformanceMode::None)
+               ->setSharingMode(oboe::SharingMode::Exclusive)
+               ->setFormat(oboe::AudioFormat::Float)
+               ->setSampleRate(configuredSampleRate)
+               ->setChannelCount(configuredChannelCount)
+               ->setErrorCallback(this)
+               ->setUsage(oboe::Usage::Media)
+               ->setContentType(oboe::ContentType::Music);
+
+        oboe::Result result = builder.openStream(&stream);
+        if (result == oboe::Result::OK) {
+            stream->requestStart();
+            LOGI("Oboe stream restarted successfully in Exclusive mode (%d Hz)", configuredSampleRate);
+        } else {
+            LOGW("Restart in Exclusive mode failed: %s. Retrying in Shared mode.", oboe::convertToText(result));
+            builder.setSharingMode(oboe::SharingMode::Shared);
+            result = builder.openStream(&stream);
+            if (result == oboe::Result::OK) {
+                stream->requestStart();
+                LOGI("Oboe stream restarted in Shared mode fallback (%d Hz)", configuredSampleRate);
+            } else {
+                LOGE("Failed to restart Oboe stream in Shared mode: %s", oboe::convertToText(result));
+            }
+        }
+    }
+};
+
+extern "C" {
+
+JNIEXPORT jlong JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_openStream(JNIEnv *env, jobject thiz, jint sampleRate, jint channelCount) {
+    auto *wrapper = new OboeStreamWrapper();
+    wrapper->configuredSampleRate = sampleRate;
+    wrapper->configuredChannelCount = channelCount;
+    wrapper->dsp.setSampleRate(static_cast<double>(sampleRate));
+
+    oboe::AudioStreamBuilder builder;
+    builder.setDirection(oboe::Direction::Output)
+           ->setPerformanceMode(oboe::PerformanceMode::None)
+           ->setSharingMode(oboe::SharingMode::Exclusive)
+           ->setFormat(oboe::AudioFormat::Float)
+           ->setSampleRate(sampleRate)
+           ->setChannelCount(channelCount)
+           ->setErrorCallback(wrapper)
+           ->setUsage(oboe::Usage::Media)
+           ->setContentType(oboe::ContentType::Music);
+
+    oboe::Result result = builder.openStream(&wrapper->stream);
+    if (result != oboe::Result::OK) {
+        LOGW("Failed to open Oboe stream in Exclusive mode: %s. Retrying in Shared mode.", oboe::convertToText(result));
+        builder.setSharingMode(oboe::SharingMode::Shared);
+        result = builder.openStream(&wrapper->stream);
+    }
+
+    if (result == oboe::Result::OK && wrapper->stream) {
+        result = wrapper->stream->requestStart();
+        if (result != oboe::Result::OK) {
+            LOGE("Failed to start Oboe stream: %s", oboe::convertToText(result));
+            delete wrapper;
+            return 0;
+        }
+
+        int32_t actualRate = wrapper->stream->getSampleRate();
+        int32_t actualChannels = wrapper->stream->getChannelCount();
+        wrapper->dsp.setSampleRate(static_cast<double>(actualRate));
+        wrapper->resampler.configure(sampleRate, actualRate, actualChannels, antigravity::ResampleQuality::SINC_BEST);
+
+        LOGI("✦ [OBOE HI-FI STREAM ENGAGED] ✦");
+        LOGI("  API: %s", oboe::convertToText(wrapper->stream->getAudioApi()));
+        LOGI("  Sharing Mode: %s", (wrapper->stream->getSharingMode() == oboe::SharingMode::Exclusive ? "EXCLUSIVE (Bit-Perfect Direct)" : "SHARED"));
+        LOGI("  Input Sample Rate: %d Hz -> Output: %d Hz", sampleRate, actualRate);
+        LOGI("  Channels: %d", actualChannels);
+        LOGI("  Format: 32-bit Float PCM (64-bit Native DSP Math)");
+        LOGI("  Buffer Size: %d frames", wrapper->stream->getBufferSizeInFrames());
+
+        return reinterpret_cast<jlong>(wrapper);
+    } else {
+        LOGE("Failed to open Oboe stream: %s", oboe::convertToText(result));
+        delete wrapper;
+        return 0;
+    }
+}
+
+JNIEXPORT jint JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_write(JNIEnv *env, jobject thiz, jlong handle, jfloatArray audioData, jint numFrames) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (!wrapper || !wrapper->stream || numFrames <= 0) return -1;
+
+    jfloat *data = env->GetFloatArrayElements(audioData, nullptr);
+    if (!data) return -1;
+
+    int32_t channelCount = wrapper->configuredChannelCount;
+
+    // 1. Process 64-bit Native C++ Audiophile DSP
+    wrapper->dsp.process(data, numFrames, channelCount);
+
+    // 2. High-Precision Resampling if hardware rate differs
+    const float *sendData = data;
+    int32_t framesToSend = numFrames;
+
+    if (!wrapper->resampler.isPassThrough()) {
+        int32_t resampledFrames = wrapper->resampler.process(data, numFrames, wrapper->resampleBuffer);
+        if (resampledFrames > 0) {
+            sendData = wrapper->resampleBuffer.data();
+            framesToSend = resampledFrames;
+        }
+    }
+
+    // 3. Native Direct Blocking Write (500ms timeout)
+    std::lock_guard<std::mutex> lock(wrapper->streamMutex);
+    if (!wrapper->stream) {
+        env->ReleaseFloatArrayElements(audioData, data, 0);
+        return -1;
+    }
+
+    int64_t timeoutNanos = 500 * 1000000LL; // 500ms
+    oboe::ResultWithValue<int32_t> result = wrapper->stream->write(sendData, framesToSend, timeoutNanos);
+    int32_t written = result.value();
+
+    if (result.error() != oboe::Result::OK) {
+        LOGW("Oboe write error: %s", oboe::convertToText(result.error()));
+    }
+
+    env->ReleaseFloatArrayElements(audioData, data, 0);
+
+    // Return consumed input frames count
+    if (wrapper->resampler.isPassThrough()) {
+        return written;
+    } else {
+        double ratio = static_cast<double>(framesToSend) / static_cast<double>(numFrames);
+        return (ratio > 0.0) ? static_cast<jint>(std::round(written / ratio)) : numFrames;
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_closeStream(JNIEnv *env, jobject thiz, jlong handle) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) {
+        delete wrapper;
+        LOGI("Oboe Stream Terminated cleanly");
+    }
+}
+
+JNIEXPORT jint JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_getSampleRate(JNIEnv *env, jobject thiz, jlong handle) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    return (wrapper && wrapper->stream) ? wrapper->stream->getSampleRate() : 0;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_isExclusive(JNIEnv *env, jobject thiz, jlong handle) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    return (wrapper && wrapper->stream && wrapper->stream->getSharingMode() == oboe::SharingMode::Exclusive) ? JNI_TRUE : JNI_FALSE;
+}
+
+// ---------------- DSP JNI CONTROLS ----------------
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setDspEnabled(JNIEnv *env, jobject thiz, jlong handle, jboolean enabled) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setEnabled(enabled == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setBitPerfectBypass(JNIEnv *env, jobject thiz, jlong handle, jboolean bypass) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setBitPerfectBypass(bypass == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setPreAmpGainDb(JNIEnv *env, jobject thiz, jlong handle, jdouble gainDb) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setPreAmpGainDb(gainDb);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setBandGain(JNIEnv *env, jobject thiz, jlong handle, jint bandIndex, jdouble gainDb) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setBandGain(bandIndex, gainDb);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setBassBoostGainDb(JNIEnv *env, jobject thiz, jlong handle, jdouble gainDb) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setBassBoostGainDb(gainDb);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setTrebleGainDb(JNIEnv *env, jobject thiz, jlong handle, jdouble gainDb) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setTrebleGainDb(gainDb);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setHarmonicExciterLevel(JNIEnv *env, jobject thiz, jlong handle, jdouble level) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setHarmonicExciterLevel(level);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setClarityEnhancerGain(JNIEnv *env, jobject thiz, jlong handle, jdouble gainDb) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setClarityEnhancerGain(gainDb);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setStereoExpansionMultiplier(JNIEnv *env, jobject thiz, jlong handle, jdouble multiplier) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setStereoExpansionMultiplier(multiplier);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setDvcVolume(JNIEnv *env, jobject thiz, jlong handle, jdouble volume) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setDvcVolume(volume);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setDitherStrength(JNIEnv *env, jobject thiz, jlong handle, jdouble strength) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setDitherStrength(strength);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setOutputBitDepth(JNIEnv *env, jobject thiz, jlong handle, jint bitDepth) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setOutputBitDepth(bitDepth);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setWarmSaturationLevel(JNIEnv *env, jobject thiz, jlong handle, jdouble level) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setWarmSaturationLevel(level);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setTriodeWarmthLevel(JNIEnv *env, jobject thiz, jlong handle, jdouble level) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setTriodeWarmthLevel(level);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setPentodeTapeLevel(JNIEnv *env, jobject thiz, jlong handle, jdouble level) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setPentodeTapeLevel(level);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setCrossfeedLevel(JNIEnv *env, jobject thiz, jlong handle, jdouble level) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setCrossfeedLevel(level);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setLimiterEnabled(JNIEnv *env, jobject thiz, jlong handle, jboolean enabled) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setLimiterEnabled(enabled == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setLimiterThresholdDb(JNIEnv *env, jobject thiz, jlong handle, jdouble thresholdDb) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setLimiterThresholdDb(thresholdDb);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setSubBassMonoEnabled(JNIEnv *env, jobject thiz, jlong handle, jboolean enabled) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setSubBassMonoEnabled(enabled == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setChannelBalance(JNIEnv *env, jobject thiz, jlong handle, jdouble balance) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setChannelBalance(balance);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setInvertPhase(JNIEnv *env, jobject thiz, jlong handle, jboolean invert) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setInvertPhase(invert == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setAirPresenceGainDb(JNIEnv *env, jobject thiz, jlong handle, jdouble gainDb) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setAirPresenceGainDb(gainDb);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_clearPeqBands(JNIEnv *env, jobject thiz, jlong handle) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.clearPeqBands();
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_addPeqBand(JNIEnv *env, jobject thiz, jlong handle, jint type, jdouble frequency, jdouble q, jdouble gainDb) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) {
+        wrapper->dsp.addPeqBand(static_cast<antigravity::FilterType>(type), frequency, q, gainDb);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_updatePeqBand(JNIEnv *env, jobject thiz, jlong handle, jint index, jint type, jdouble frequency, jdouble q, jdouble gainDb) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper && index >= 0) {
+        wrapper->dsp.updatePeqBand(static_cast<size_t>(index), static_cast<antigravity::FilterType>(type), frequency, q, gainDb);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setResamplerQuality(JNIEnv *env, jobject thiz, jlong handle, jint quality) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper && wrapper->stream) {
+        wrapper->resampler.configure(
+            wrapper->configuredSampleRate,
+            wrapper->stream->getSampleRate(),
+            wrapper->stream->getChannelCount(),
+            static_cast<antigravity::ResampleQuality>(quality)
+        );
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setHrtfSpatialEnabled(JNIEnv *env, jobject thiz, jlong handle, jboolean enabled) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setHrtfSpatialEnabled(enabled == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setHrtfRoomSize(JNIEnv *env, jobject thiz, jlong handle, jdouble roomSize) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->dsp.setHrtfRoomSize(roomSize);
+}
+
+// ---------------- DSD JNI CONTROLS ----------------
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_setDsdMode(JNIEnv *env, jobject thiz, jlong handle, jint mode, jint dsdRate) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) {
+        wrapper->dsd.configure(static_cast<antigravity::DsdMode>(mode), dsdRate);
+    }
+}
+
+// ---------------- TELEMETRY JNI ----------------
+
+JNIEXPORT jdouble JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_getPeakL(JNIEnv *env, jobject thiz, jlong handle) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    return wrapper ? wrapper->dsp.getPeakL() : 0.0;
+}
+
+JNIEXPORT jdouble JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_getPeakR(JNIEnv *env, jobject thiz, jlong handle) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    return wrapper ? wrapper->dsp.getPeakR() : 0.0;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_getPhaseCorrelation(JNIEnv *env, jobject thiz, jlong handle) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    return wrapper ? wrapper->dsp.getPhaseCorrelation() : 1.0f;
+}
+
+}
+
