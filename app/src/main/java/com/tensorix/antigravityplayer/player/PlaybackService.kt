@@ -12,6 +12,9 @@ import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.edit
+import com.tensorix.antigravityplayer.audio.HiFiActivationResult
+import com.tensorix.antigravityplayer.audio.HiFiStateManager
+import com.tensorix.antigravityplayer.audio.HiFiBadgeState
 import com.tensorix.antigravityplayer.audio.HardwareHiFiVerifier
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -96,54 +99,59 @@ class PlaybackService : MediaSessionService() {
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
-    private val audioScope = CoroutineScope(Dispatchers.IO + Job())
     private var configJob: Job? = null
-    private var volumeReceiver: android.content.BroadcastReceiver? = null
-    private var bitPerfectReceiver: android.content.BroadcastReceiver? = null
+    private var volumeReceiver: BroadcastReceiver? = null
+    private var bitPerfectReceiver: BroadcastReceiver? = null
 
-    private val audioOutputReceiver = object : BroadcastReceiver() {
+    private val headsetReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 Intent.ACTION_HEADSET_PLUG -> {
-                    // Wired headset (3.5mm jack) - same as AudioManager.ACTION_HEADSET_PLUG
-                    val state = intent.getIntExtra("state", 0)
-                    val hasHeadset = state == 1
-                    Log.d("HiFi", "Wired headset: $hasHeadset")
-                    handleAudioOutputChanged(hasHeadset)
+                    val state = intent.getIntExtra("state", -1)
+                    handleAudioOutputChanged(state == 1)
+                }
+                AudioManager.ACTION_AUDIO_BECOMING_NOISY -> {
+                    player?.pause()
+                    handleAudioOutputChanged(false)
                 }
                 BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED -> {
-                    // Bluetooth A2DP headphone/speaker connected
                     val state = intent.getIntExtra(BluetoothProfile.EXTRA_STATE, BluetoothProfile.STATE_DISCONNECTED)
-                    val connected = state == BluetoothProfile.STATE_CONNECTED
-                    Log.d("HiFi", "Bluetooth A2DP: $connected")
-                    handleAudioOutputChanged(connected)
+                    handleAudioOutputChanged(state == BluetoothProfile.STATE_CONNECTED)
                 }
                 AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED -> {
-                    // Bluetooth SCO (headset with mic)
                     val state = intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, AudioManager.SCO_AUDIO_STATE_DISCONNECTED)
-                    val connected = state == AudioManager.SCO_AUDIO_STATE_CONNECTED
-                    handleAudioOutputChanged(connected)
+                    handleAudioOutputChanged(state == AudioManager.SCO_AUDIO_STATE_CONNECTED)
                 }
             }
         }
     }
 
     private fun handleAudioOutputChanged(externalOutputConnected: Boolean) {
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-
-        // Cross-check actual routing — works on all Android versions
-        val isWiredConnected = audioManager.isWiredHeadsetOn
-        @Suppress("DEPRECATION")
-        val isBluetoothConnected = audioManager.isBluetoothA2dpOn || audioManager.isBluetoothScoOn
-
-        val shouldEnableHiFi = externalOutputConnected || isWiredConnected || isBluetoothConnected
-
-        Log.d("HiFi", "Output changed → wired=$isWiredConnected, bt=$isBluetoothConnected → hifi=$shouldEnableHiFi")
-
-        if (_hiFiEnabled.value != shouldEnableHiFi) {
-            _hiFiEnabled.value = shouldEnableHiFi
-            audioPrefs.edit { putBoolean("hi_fi_enabled", shouldEnableHiFi) }
-            // Rebuild ExoPlayer with updated AudioSink settings
+        // Re-evaluate actual audio output state
+        HiFiStateManager.evaluate(applicationContext)
+        val hifiState = HiFiStateManager.state.value
+        
+        Log.d("HiFi", "Output changed → type=${hifiState.outputType}, hifi=${hifiState.isHiFiActive}, sr=${hifiState.sampleRate}")
+        
+        // Sync HiFiBadgeState from the single source of truth
+        HiFiBadgeState.update(
+            HiFiActivationResult(
+                isHiFiConfirmed = hifiState.isHiFiActive,
+                activeOem = hifiState.manufacturer,
+                confirmedParameter = "output=${hifiState.outputType.name}|sr=${hifiState.sampleRate}",
+                outputSampleRate = hifiState.sampleRate,
+                isLowLatencyPath = hifiState.isHiFiActive,
+                isWiredConnected = hifiState.outputType == HiFiStateManager.OutputType.WIRED || 
+                                   hifiState.outputType == HiFiStateManager.OutputType.USB_DAC,
+                isExclusiveModeActive = false
+            )
+        )
+        
+        // Also update ExoPlayer pipeline enable/disable
+        val shouldEnablePipeline = hifiState.isHiFiActive
+        if (_hiFiEnabled.value != shouldEnablePipeline) {
+            _hiFiEnabled.value = shouldEnablePipeline
+            audioPrefs.edit { putBoolean("hi_fi_enabled", shouldEnablePipeline) }
             reloadAudioPipeline()
         }
     }
@@ -154,16 +162,17 @@ class PlaybackService : MediaSessionService() {
             addAction(AudioManager.ACTION_HEADSET_PLUG)
             addAction(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
             addAction(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED)
+            addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(audioOutputReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(headsetReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
-            registerReceiver(audioOutputReceiver, filter)
+            registerReceiver(headsetReceiver, filter)
         }
     }
 
     private fun unregisterAudioOutputReceiver() {
-        runCatching { unregisterReceiver(audioOutputReceiver) }
+        runCatching { unregisterReceiver(headsetReceiver) }
     }
 
     private val _hiFiEnabled = MutableStateFlow(true)
@@ -266,33 +275,26 @@ class PlaybackService : MediaSessionService() {
             }
         }
         
-        // Register becoming noisy receiver to pause on headphone/BT disconnect
-        val noisyFilter = android.content.IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(becomingNoisyReceiver, noisyFilter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(becomingNoisyReceiver, noisyFilter)
-        }
+        // Broadcast receivers are now consolidated into headsetReceiver registered via registerAudioOutputReceiver()
 
-        val bitPerfectFilter = android.content.IntentFilter("com.tensorix.antigravityplayer.SET_BIT_PERFECT")
-        val receiver = object : android.content.BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: android.content.Intent?) {
+        val bitPerfectFilter = IntentFilter("com.tensorix.antigravityplayer.SET_BIT_PERFECT")
+        bitPerfectReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
                 val enabled = intent?.getBooleanExtra("enabled", false) ?: false
                 Log.i("AntigravityAudioAudit", "[CMD] Received SET_BIT_PERFECT broadcast: enabled=$enabled")
                 setBitPerfectMode(enabled)
             }
         }
-        bitPerfectReceiver = receiver
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(receiver, bitPerfectFilter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(bitPerfectReceiver, bitPerfectFilter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
-            registerReceiver(receiver, bitPerfectFilter)
+            registerReceiver(bitPerfectReceiver, bitPerfectFilter)
         }
 
         // Listen to volume changes for DVC using BroadcastReceiver
-        volumeReceiver = object : android.content.BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: android.content.Intent?) {
+        volumeReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == "android.media.VOLUME_CHANGED_ACTION") {
                     val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
                     val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
@@ -306,7 +308,7 @@ class PlaybackService : MediaSessionService() {
                 }
             }
         }
-        val volFilter = android.content.IntentFilter("android.media.VOLUME_CHANGED_ACTION")
+        val volFilter = IntentFilter("android.media.VOLUME_CHANGED_ACTION")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(volumeReceiver, volFilter, Context.RECEIVER_NOT_EXPORTED)
         } else {
@@ -323,7 +325,7 @@ class PlaybackService : MediaSessionService() {
         }
 
 
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = android.app.NotificationChannel(
                 CHANNEL_ID,
                 "Antigravity Playback",
@@ -339,13 +341,22 @@ class PlaybackService : MediaSessionService() {
         buildAndAttachPlayer()
         showPlaybackNotification("Antigravity Player ready", "Preparing audio pipeline")
 
-        audioScope.launch {
-            val hifiRes = VendorDacManager.activateHardwareDac(applicationContext)
-            withContext(Dispatchers.Main) {
-                com.tensorix.antigravityplayer.audio.HiFiBadgeState.update(hifiRes)
-                Log.i("HiFiActivator", "HI-FI Status: ${hifiRes.isHiFiConfirmed}, OEM: ${hifiRes.activeOem}")
-            }
-        }
+        // Initial HiFi state evaluation on service start
+        HiFiStateManager.evaluate(applicationContext)
+        val initialState = HiFiStateManager.state.value
+        HiFiBadgeState.update(
+            HiFiActivationResult(
+                isHiFiConfirmed = initialState.isHiFiActive,
+                activeOem = initialState.manufacturer,
+                confirmedParameter = "init|output=${initialState.outputType.name}",
+                outputSampleRate = initialState.sampleRate,
+                isLowLatencyPath = initialState.isHiFiActive,
+                isWiredConnected = initialState.outputType == HiFiStateManager.OutputType.WIRED ||
+                                   initialState.outputType == HiFiStateManager.OutputType.USB_DAC,
+                isExclusiveModeActive = false
+            )
+        )
+        registerAudioOutputReceiver()
     }
 
     internal fun reloadAudioPipeline() {
@@ -374,10 +385,21 @@ class PlaybackService : MediaSessionService() {
             refreshAudiophileState()
             showPlaybackNotification("Antigravity Player", if (playWhenReady) "Playing" else "Ready")
 
-            val hifiRes = withContext(Dispatchers.IO) {
-                VendorDacManager.activateHardwareDac(applicationContext)
-            }
-            com.tensorix.antigravityplayer.audio.HiFiBadgeState.update(hifiRes)
+            // Re-evaluate HiFi state from truth source
+            HiFiStateManager.evaluate(applicationContext)
+            val hifiState = HiFiStateManager.state.value
+            HiFiBadgeState.update(
+                HiFiActivationResult(
+                    isHiFiConfirmed = hifiState.isHiFiActive,
+                    activeOem = hifiState.manufacturer,
+                    confirmedParameter = "reload|output=${hifiState.outputType.name}",
+                    outputSampleRate = hifiState.sampleRate,
+                    isLowLatencyPath = hifiState.isHiFiActive,
+                    isWiredConnected = hifiState.outputType == HiFiStateManager.OutputType.WIRED || 
+                                       hifiState.outputType == HiFiStateManager.OutputType.USB_DAC,
+                    isExclusiveModeActive = false
+                )
+            )
         }
     }
 
@@ -425,8 +447,8 @@ class PlaybackService : MediaSessionService() {
                                 onExclusiveModeChanged = { exclusive ->
                                     _oboeMode.value = if (exclusive) "EXCLUSIVE" else "SHARED"
                                     Log.i("AntigravityAudioAudit", "Oboe Mode: ${_oboeMode.value}")
-                                    com.tensorix.antigravityplayer.audio.HiFiBadgeState.updateOboeMode(exclusive)
-                                    com.tensorix.antigravityplayer.audio.HiFiBadgeState.updateExclusive(exclusive)
+                                    // Handle via re-evaluation
+                                    handleAudioOutputChanged(true)
                                 }
                             )
                         } catch (e: Exception) {
@@ -644,7 +666,6 @@ class PlaybackService : MediaSessionService() {
         player = exoPlayer
         mediaSession = MediaSession.Builder(this, exoPlayer).build()
         refreshAudiophileState()
-        registerAudioOutputReceiver()
     }
 
     private fun showPlaybackNotification(title: String, text: String) {
@@ -774,15 +795,15 @@ class PlaybackService : MediaSessionService() {
 
     fun isPlayerReady(): Boolean = player != null && mediaSession != null
 
-    override fun onTaskRemoved(rootIntent: android.content.Intent?) {
+    override fun onTaskRemoved(rootIntent: Intent?) {
         val player = mediaSession?.player
         if (player != null && !player.playWhenReady) {
             stopSelf()
         }
     }
 
-    private val becomingNoisyReceiver = object : android.content.BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: android.content.Intent?) {
+    private val becomingNoisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
                 player?.pause()
             }
@@ -791,10 +812,10 @@ class PlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         unregisterAudioOutputReceiver()
+        HiFiStateManager.reset()
         configJob?.cancel()
         serviceScope.coroutineContext[Job]?.cancel()
 
-        runCatching { unregisterReceiver(becomingNoisyReceiver) }
         bitPerfectReceiver?.let { runCatching { unregisterReceiver(it) } }
         
         VendorDacManager.deactivate(applicationContext)
