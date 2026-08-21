@@ -22,12 +22,70 @@ enum class ListeningMode(val displayName: String, val badge: String, val descrip
 }
 
 enum class BitPerfectState(val label: String) {
-    ACTIVE_DIRECT("Bit-Perfect (Direct Hardware Passthrough)"),
-    BYPASS_DSP("Bit-Perfect (DSP Bypassed, AudioSink Float)"),
-    DSP_ACTIVE("Processed (DSP / Parametric EQ Active)"),
-    AUDIOFLINGER_MIXED("AudioFlinger Mixer (System Resampled)"),
-    UNSUPPORTED("Standard Android Audio Pipeline")
+    DISABLED("Disabled by User"),
+    UNAVAILABLE("Not Supported by Hardware/Path"),
+    ELIGIBLE("Eligible (Path supports bit-perfect)"),
+    REQUESTED("Requested (Awaiting verification)"),
+    ACTIVE_UNVERIFIED("Active (Path established, but not verified)"),
+    VERIFIED("Verified (Bit-Perfect playback confirmed)"),
+    FAILED("Failed (Path mismatch or DSP active)"),
+    BROKEN("Broken (Internal Error)"),
+    UNKNOWN("Unknown State")
 }
+
+enum class EvidenceSource {
+    SOURCE_METADATA,
+    ANDROID_AUDIO_DEVICE,
+    AUDIO_TRACK,
+    OBOE_STREAM,
+    USB_DESCRIPTOR,
+    HAL_PARAMETER,
+    VENDOR_API,
+    HEURISTIC,
+    UNKNOWN
+}
+
+enum class Confidence {
+    VERIFIED,
+    HIGH_CONFIDENCE,
+    INFERRED,
+    UNKNOWN,
+    UNAVAILABLE
+}
+
+data class AudioEvidence<T>(
+    val value: T,
+    val source: EvidenceSource,
+    val confidence: Confidence,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+data class AudioFormatSnapshot(
+    val sampleRate: AudioEvidence<Int>,
+    val bitDepth: AudioEvidence<Int>,
+    val channels: AudioEvidence<Int>,
+    val encoding: AudioEvidence<String>
+)
+
+data class AudioRuntimeSnapshot(
+    val sourceFormat: AudioFormatSnapshot,
+    val decodedFormat: AudioFormatSnapshot,
+    val processingFormat: AudioFormatSnapshot,
+    val requestedOutputFormat: AudioFormatSnapshot,
+    val actualOutputFormat: AudioFormatSnapshot,
+
+    val activeRoute: AudioEvidence<AudioOutputRouteType>,
+    val audioApi: AudioEvidence<AudioOutputApi>,
+    val sharingMode: AudioEvidence<String>, // EXCLUSIVE / SHARED
+    val performanceMode: AudioEvidence<String>,
+
+    val directPlaybackActive: AudioEvidence<Boolean>,
+    val resamplerState: AudioEvidence<String>, // OFF / ACTIVE / BYPASS
+    val dspState: AudioEvidence<String>, // OFF / ACTIVE / BYPASS
+
+    val bitPerfectState: BitPerfectState,
+    val bitPerfectEvidence: String = ""
+)
 
 enum class AudioOutputApi(val label: String) {
     AAUDIO("AAudio (High Performance)"),
@@ -85,12 +143,13 @@ data class AudioOutputState(
     val currentPlaybackSampleRate: Int = 0,
     val currentPlaybackBitDepth: Int = 0,
     val playbackPath: String = "Unknown",
-    val bitPerfectState: BitPerfectState = BitPerfectState.UNSUPPORTED,
+    val bitPerfectState: BitPerfectState = BitPerfectState.UNKNOWN,
     val bitPerfectPossible: Boolean = false,
     val resamplingRequired: Boolean = false,
     val signalPathStages: List<SignalPathStage> = emptyList(),
     val deviceLimitations: List<String> = emptyList(),
-    val latencyMs: Int = 0
+    val latencyMs: Int = 0,
+    val runtimeSnapshot: AudioRuntimeSnapshot? = null
 )
 
 data class AudioQualityState(

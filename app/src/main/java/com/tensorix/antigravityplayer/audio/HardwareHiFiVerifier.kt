@@ -44,6 +44,7 @@ enum class AudioFlingerThreadType(val displayName: String) {
 
 data class HardwareVerificationReport(
     val isDirectOutputSupported: Boolean = false,
+    val isDirectOutputActive: Boolean = false,
     val isVendorHiFiActive: Boolean = false,
     val hardwareDacState: HardwareDacState = HardwareDacState.UNKNOWN_HAL_RESTRICTED,
     val audioThreadType: AudioFlingerThreadType = AudioFlingerThreadType.MIXER_THREAD,
@@ -52,6 +53,7 @@ data class HardwareVerificationReport(
     val actualAudioSinkType: String = "Standard AudioTrack (AudioFlinger)",
     val activeDacName: String = "Standard Android Audio HAL",
     val dacVendor: String = "Google / AOSP Audio",
+    val isBitPerfectEligible: Boolean = false,
     val isBitPerfectVerified: Boolean = false,
     val isWiredHeadsetConnected: Boolean = false,
     val verificationDetails: List<String> = emptyList(),
@@ -158,75 +160,84 @@ object HardwareHiFiVerifier {
         val systemSampleRate = audioManager?.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toIntOrNull() ?: 48000
         val framesPerBuffer = audioManager?.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)?.toIntOrNull() ?: 192
 
-        // Check wired headset connection (Required for Vivo X21A / LG Quad DAC Hi-Fi activation)
+        // Check wired headset connection
         val isWiredHeadset = checkWiredHeadset(audioManager)
         if (isWiredHeadset) {
-            details.add("Wired 3.5mm Headset / Headphones detected")
+            details.add("Wired 3.5mm Headset / USB DAC detected")
         } else {
-            limitations.add("No wired headset attached; OEM Hi-Fi DACs remain in standby")
+            limitations.add("No wired output attached; standard path active")
         }
 
-        // 1. Probe Direct Output Support across HAL APIs
+        // 1. Probe Direct Output SUPPORT (Theoretical)
         val isDirectSupported = probeDirectOutput(context, trackSampleRate, trackBitDepth, details)
 
-        // 2. Probe Vendor Hi-Fi DAC State (Vivo X21A / Qualcomm / LG / Samsung / Sony)
+        // 2. Probe Direct Output ACTIVE (Runtime Proof)
+        var isDirectActive = false
+        try {
+            audioManager?.let { am ->
+                val keys = listOf("direct_pcm", "qcom_direct_pcm", "audio_stream_direct")
+                val values = keys.associateWith { key -> runCatching { am.getParameters(key) }.getOrDefault("") }
+                isDirectActive = values.values.any { it.contains("=1") || it.contains("=true", true) || it.contains("on", true) }
+                if (isDirectActive) {
+                    details.add("Direct PCM HAL parameter confirmed active via AudioManager")
+                }
+            }
+        } catch (e: Exception) { }
+
+        // 3. Probe Vendor Hi-Fi DAC State
         val (isVendorHiFi, dacState, dacName, dacVendor) = probeVendorDac(context, isWiredHeadset, details)
 
-        // 3. AudioFlinger Thread Type Detection
+        // 4. AudioFlinger Thread Type Detection
         val threadType = when {
             isVendorHiFi && isDirectSupported -> AudioFlingerThreadType.OFFLOAD_THREAD
-            isDirectSupported -> AudioFlingerThreadType.DIRECT_THREAD
+            isDirectActive || isDirectSupported -> AudioFlingerThreadType.DIRECT_THREAD
             else -> AudioFlingerThreadType.MIXER_THREAD
         }
 
-        // 4. AudioSink Type Determination
+        // 5. AudioSink Type Determination
         val audioSinkType = when (threadType) {
             AudioFlingerThreadType.OFFLOAD_THREAD -> "Direct Hardware Offload (Native DAC Bus)"
-            AudioFlingerThreadType.DIRECT_THREAD -> "Direct PCM AudioTrack (Direct Sink)"
+            AudioFlingerThreadType.DIRECT_THREAD -> if (isDirectActive) "Direct PCM (Active Verified)" else "Direct PCM (Supported)"
             AudioFlingerThreadType.MIXER_THREAD -> "32-bit Float AudioSink (AudioFlinger Mixer)"
             AudioFlingerThreadType.UNKNOWN -> "Standard AudioTrack"
         }
 
-        // 5. Strict Bit-Perfect Verification (Pure Math & Real Hardware Alignment)
-        // Bit-Perfect is TRUE ONLY IF:
-        //  - DSP is completely disabled/bypassed
-        //  - Direct Output path is verified active
-        //  - Sample rate is matched 1:1 without AudioFlinger resampling
-        //  - Bit depth is preserved
+        // 6. Strict Bit-Perfect Verification
         val isSampleRateMatched = (trackSampleRate > 0 && trackSampleRate == systemSampleRate) || (isDirectSupported && trackSampleRate > 0)
         val isBitDepthPreserved = trackBitDepth <= 24
-        val isBitPerfect = isDspBypassed && isDirectSupported && isSampleRateMatched && isBitDepthPreserved
+        val isEligible = isDspBypassed && isDirectSupported && isSampleRateMatched && isBitDepthPreserved
+        
+        // Verified requires actual direct path active proof
+        val isVerified = isEligible && isDirectActive
 
         if (!isDirectSupported) {
-            limitations.add("Direct AudioTrack path is inactive (AudioFlinger mixer active at $systemSampleRate Hz)")
+            limitations.add("Direct AudioTrack path is unsupported for this format")
         }
         if (!isDspBypassed) {
-            limitations.add("DSP Equalizer is active (software processing enabled)")
+            limitations.add("DSP Engine is modifying PCM samples")
         }
         if (!isDirectSupported && trackSampleRate > 0 && trackSampleRate != systemSampleRate) {
-            limitations.add("Android AudioFlinger resamples track ($trackSampleRate Hz ➔ $systemSampleRate Hz)")
+            limitations.add("System resamples track ($trackSampleRate Hz ➔ $systemSampleRate Hz)")
         }
-        if (dacState == HardwareDacState.UNKNOWN_HAL_RESTRICTED) {
-            details.add("DAC power rail read restricted by Android SELinux policy")
-        }
-
-        Log.i("AntigravityAudioAudit", "[VERIFIER] Direct=$isDirectSupported, HiFi=$isVendorHiFi, Thread=${threadType.name}, DAC=$dacName, State=$dacState, BitPerfect=$isBitPerfect")
 
         val report = HardwareVerificationReport(
             isDirectOutputSupported = isDirectSupported,
+            isDirectOutputActive = isDirectActive,
             isVendorHiFiActive = isVendorHiFi,
             hardwareDacState = dacState,
             audioThreadType = threadType,
-            actualOutputSampleRate = if (isDirectSupported && trackSampleRate > 0) trackSampleRate else systemSampleRate,
+            actualOutputSampleRate = if ((isDirectActive || isDirectSupported) && trackSampleRate > 0) trackSampleRate else systemSampleRate,
             actualOutputFramesPerBuffer = framesPerBuffer,
             actualAudioSinkType = audioSinkType,
             activeDacName = dacName,
             dacVendor = dacVendor,
-            isBitPerfectVerified = isBitPerfect,
+            isBitPerfectEligible = isEligible,
+            isBitPerfectVerified = isVerified,
             isWiredHeadsetConnected = isWiredHeadset,
             verificationDetails = details,
             limitations = limitations
         )
+
 
         cachedResult = report
         lastProbeTime = now

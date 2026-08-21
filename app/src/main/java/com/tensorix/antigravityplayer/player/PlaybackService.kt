@@ -134,19 +134,7 @@ class PlaybackService : MediaSessionService() {
         
         Log.d("HiFi", "Output changed → type=${hifiState.outputType}, hifi=${hifiState.isHiFiActive}, sr=${hifiState.sampleRate}")
         
-        // Sync HiFiBadgeState from the single source of truth
-        HiFiBadgeState.update(
-            HiFiActivationResult(
-                isHiFiConfirmed = hifiState.isHiFiActive,
-                activeOem = hifiState.manufacturer,
-                confirmedParameter = "output=${hifiState.outputType.name}|sr=${hifiState.sampleRate}",
-                outputSampleRate = hifiState.sampleRate,
-                isLowLatencyPath = hifiState.isHiFiActive,
-                isWiredConnected = hifiState.outputType == HiFiStateManager.OutputType.WIRED || 
-                                   hifiState.outputType == HiFiStateManager.OutputType.USB_DAC,
-                isExclusiveModeActive = false
-            )
-        )
+        refreshAudiophileState()
         
         // Also update ExoPlayer pipeline enable/disable
         val shouldEnablePipeline = hifiState.isHiFiActive
@@ -342,21 +330,7 @@ class PlaybackService : MediaSessionService() {
         buildAndAttachPlayer()
         showPlaybackNotification("Antigravity Player ready", "Preparing audio pipeline")
 
-        // Initial HiFi state evaluation on service start
-        HiFiStateManager.evaluate(applicationContext)
-        val initialState = HiFiStateManager.state.value
-        HiFiBadgeState.update(
-            HiFiActivationResult(
-                isHiFiConfirmed = initialState.isHiFiActive,
-                activeOem = initialState.manufacturer,
-                confirmedParameter = "init|output=${initialState.outputType.name}",
-                outputSampleRate = initialState.sampleRate,
-                isLowLatencyPath = initialState.isHiFiActive,
-                isWiredConnected = initialState.outputType == HiFiStateManager.OutputType.WIRED ||
-                                   initialState.outputType == HiFiStateManager.OutputType.USB_DAC,
-                isExclusiveModeActive = false
-            )
-        )
+        refreshAudiophileState()
         registerAudioOutputReceiver()
     }
 
@@ -385,22 +359,6 @@ class PlaybackService : MediaSessionService() {
             }
             refreshAudiophileState()
             showPlaybackNotification("Antigravity Player", if (playWhenReady) "Playing" else "Ready")
-
-            // Re-evaluate HiFi state from truth source
-            HiFiStateManager.evaluate(applicationContext)
-            val hifiState = HiFiStateManager.state.value
-            HiFiBadgeState.update(
-                HiFiActivationResult(
-                    isHiFiConfirmed = hifiState.isHiFiActive,
-                    activeOem = hifiState.manufacturer,
-                    confirmedParameter = "reload|output=${hifiState.outputType.name}",
-                    outputSampleRate = hifiState.sampleRate,
-                    isLowLatencyPath = hifiState.isHiFiActive,
-                    isWiredConnected = hifiState.outputType == HiFiStateManager.OutputType.WIRED || 
-                                       hifiState.outputType == HiFiStateManager.OutputType.USB_DAC,
-                    isExclusiveModeActive = false
-                )
-            )
         }
     }
 
@@ -438,13 +396,13 @@ class PlaybackService : MediaSessionService() {
 
                     Log.d("AntigravityAudioAudit", "Building Sink: activeRoute=$activeRouteType, bitPerfect=$isBitPerfect, hiFiEnabled=${_hiFiEnabled.value}")
 
-                    if (com.tensorix.antigravityplayer.audio.OboeBridge.isAvailable && !isBitPerfect) {
+                    if (com.tensorix.antigravityplayer.audio.OboeBridge.isAvailable) {
                         try {
-                            Log.i("AntigravityAudioAudit", "Using OboeAudioSink for High-Performance path")
+                            Log.i("AntigravityAudioAudit", "Using OboeAudioSink for High-Performance path (Bit-Perfect: $isBitPerfect)")
                             return com.tensorix.antigravityplayer.audio.OboeAudioSink(
                                 context = context,
                                 dspProcessor = dspProcessor,
-                                bitPerfectMode = false,
+                                bitPerfectMode = isBitPerfect,
                                 onExclusiveModeChanged = { exclusive ->
                                     _oboeMode.value = if (exclusive) "EXCLUSIVE" else "SHARED"
                                     Log.i("AntigravityAudioAudit", "Oboe Mode: ${_oboeMode.value}")
@@ -740,6 +698,10 @@ class PlaybackService : MediaSessionService() {
         val snapshot = outManager.currentSnapshot(trackInfo, isDspActive)
         _audiophileSnapshot.value = snapshot
         _hiFiSupportedState.value = snapshot.output.activeRoute != null
+
+        snapshot.output.runtimeSnapshot?.let { 
+            HiFiBadgeState.updateFromSnapshot(it)
+        }
         
         // Auto-switch profile and Listening Mode based on dynamic route engine
         if (_autoProfileSwitch.value) {

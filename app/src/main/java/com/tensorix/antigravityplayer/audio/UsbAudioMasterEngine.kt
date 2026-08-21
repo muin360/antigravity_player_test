@@ -96,13 +96,32 @@ class UsbAudioMasterEngine(private val context: Context) {
             }
         }
 
-        val supportedRates = if (isConnected) {
-            listOf(44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000)
-        } else {
-            emptyList()
-        }
+        // 3. Extract verified capabilities from AudioDeviceInfo
+        var supportedRates = emptyList<Int>()
+        var supportedBits = emptyList<Int>()
+        var maxRate = 0
 
-        val supportedBits = if (isConnected) listOf(16, 24, 32) else emptyList()
+        if (isConnected && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val audioDevices = am?.getDevices(AudioManager.GET_DEVICES_OUTPUTS) ?: emptyArray()
+            val usbAudio = audioDevices.firstOrNull { 
+                it.type == AudioDeviceInfo.TYPE_USB_DEVICE || 
+                it.type == AudioDeviceInfo.TYPE_USB_HEADSET 
+            }
+            usbAudio?.let { dev ->
+                supportedRates = dev.sampleRates.filter { it > 0 }.sorted()
+                val encodings = dev.encodings.filter { it > 0 }
+                supportedBits = encodings.map { enc ->
+                    when (enc) {
+                        android.media.AudioFormat.ENCODING_PCM_16BIT -> 16
+                        android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> 24
+                        android.media.AudioFormat.ENCODING_PCM_32BIT -> 32
+                        android.media.AudioFormat.ENCODING_PCM_FLOAT -> 32
+                        else -> 0
+                    }
+                }.filter { it > 0 }.distinct().sorted()
+                maxRate = supportedRates.lastOrNull() ?: 0
+            }
+        }
 
         val info = UsbDacInfo(
             isConnected = isConnected,
@@ -112,8 +131,8 @@ class UsbAudioMasterEngine(private val context: Context) {
             productId = productId,
             supportedRates = supportedRates,
             supportedBitDepths = supportedBits,
-            maxSampleRateHz = if (isConnected) 384000 else 0,
-            isBitExactCapable = isConnected
+            maxSampleRateHz = maxRate,
+            isBitExactCapable = isConnected && maxRate >= 44100
         )
 
         _usbDacState.value = info

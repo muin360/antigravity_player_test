@@ -31,6 +31,10 @@ class OboeAudioSink(
         @Volatile
         var currentActiveHandle: Long = 0L
             private set
+        
+        @Volatile
+        var currentStreamInfo: OboeBridge.NativeStreamInfo? = null
+            private set
     }
 
     private var streamHandle: Long = 0L
@@ -320,9 +324,10 @@ class OboeAudioSink(
 
     private fun openOboeStream() {
         if (OboeBridge.isAvailable && streamHandle == 0L) {
-            streamHandle = OboeBridge.openStream(sampleRate, channelCount)
+            streamHandle = OboeBridge.openStream(sampleRate, channelCount, bitPerfectMode)
             if (streamHandle != 0L) {
                 currentActiveHandle = streamHandle
+                currentStreamInfo = OboeBridge.getNativeStreamInfo(streamHandle)
                 val exclusive = OboeBridge.isExclusive(streamHandle)
                 val actualRate = OboeBridge.getSampleRate(streamHandle)
                 Log.i(TAG_LOG, "✦ Native Oboe Stream Opened: Handle=$streamHandle, Exclusive=$exclusive, Rate=$actualRate Hz ✦")
@@ -394,6 +399,7 @@ class OboeAudioSink(
             OboeBridge.closeStream(streamHandle)
             if (currentActiveHandle == streamHandle) {
                 currentActiveHandle = 0L
+                currentStreamInfo = null
             }
             streamHandle = 0L
         }

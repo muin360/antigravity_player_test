@@ -78,7 +78,7 @@ public:
 extern "C" {
 
 JNIEXPORT jlong JNICALL
-Java_com_tensorix_antigravityplayer_audio_OboeBridge_openStream(JNIEnv *env, jobject thiz, jint sampleRate, jint channelCount) {
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_openStream(JNIEnv *env, jobject thiz, jint sampleRate, jint channelCount, jboolean bitPerfectMode) {
     auto *wrapper = new OboeStreamWrapper();
     wrapper->configuredSampleRate = sampleRate;
     wrapper->configuredChannelCount = channelCount;
@@ -86,8 +86,8 @@ Java_com_tensorix_antigravityplayer_audio_OboeBridge_openStream(JNIEnv *env, job
 
     oboe::AudioStreamBuilder builder;
     builder.setDirection(oboe::Direction::Output)
-           ->setPerformanceMode(oboe::PerformanceMode::None)
-           ->setSharingMode(oboe::SharingMode::Exclusive)
+           ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+           ->setSharingMode(bitPerfectMode ? oboe::SharingMode::Exclusive : oboe::SharingMode::Shared)
            ->setFormat(oboe::AudioFormat::Float)
            ->setSampleRate(sampleRate)
            ->setChannelCount(channelCount)
@@ -95,8 +95,15 @@ Java_com_tensorix_antigravityplayer_audio_OboeBridge_openStream(JNIEnv *env, job
            ->setUsage(oboe::Usage::Media)
            ->setContentType(oboe::ContentType::Music);
 
+    if (bitPerfectMode) {
+        // For bit-perfect, we insist on Exclusive mode first
+        builder.setSharingMode(oboe::SharingMode::Exclusive);
+    }
+
     oboe::Result result = builder.openStream(&wrapper->stream);
-    if (result != oboe::Result::OK) {
+
+    // If not bit-perfect and exclusive failed, try shared
+    if (!bitPerfectMode && result != oboe::Result::OK) {
         LOGW("Failed to open Oboe stream in Exclusive mode: %s. Retrying in Shared mode.", oboe::convertToText(result));
         builder.setSharingMode(oboe::SharingMode::Shared);
         result = builder.openStream(&wrapper->stream);
@@ -118,6 +125,7 @@ Java_com_tensorix_antigravityplayer_audio_OboeBridge_openStream(JNIEnv *env, job
         LOGI("✦ [OBOE HI-FI STREAM ENGAGED] ✦");
         LOGI("  API: %s", oboe::convertToText(wrapper->stream->getAudioApi()));
         LOGI("  Sharing Mode: %s", (wrapper->stream->getSharingMode() == oboe::SharingMode::Exclusive ? "EXCLUSIVE (Bit-Perfect Direct)" : "SHARED"));
+        LOGI("  Bit-Perfect Requested: %s", (bitPerfectMode ? "YES" : "NO"));
         LOGI("  Input Sample Rate: %d Hz -> Output: %d Hz", sampleRate, actualRate);
         LOGI("  Channels: %d", actualChannels);
         LOGI("  Format: 32-bit Float PCM (64-bit Native DSP Math)");
@@ -412,6 +420,37 @@ JNIEXPORT jfloat JNICALL
 Java_com_tensorix_antigravityplayer_audio_OboeBridge_getPhaseCorrelation(JNIEnv *env, jobject thiz, jlong handle) {
     auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
     return wrapper ? wrapper->dsp.getPhaseCorrelation() : 1.0f;
+}
+
+JNIEXPORT jobject JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_getNativeStreamInfo(JNIEnv *env, jobject thiz, jlong handle) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (!wrapper || !wrapper->stream) return nullptr;
+
+    auto *stream = wrapper->stream;
+
+    jclass infoClass = env->FindClass("com/tensorix/antigravityplayer/audio/OboeBridge$NativeStreamInfo");
+    if (!infoClass) return nullptr;
+
+    jmethodID constructor = env->GetMethodID(infoClass, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IILjava/lang/String;II)V");
+    if (!constructor) return nullptr;
+
+    jstring api = env->NewStringUTF(oboe::convertToText(stream->getAudioApi()));
+    jstring sharing = env->NewStringUTF(stream->getSharingMode() == oboe::SharingMode::Exclusive ? "EXCLUSIVE" : "SHARED");
+    jstring performance = env->NewStringUTF(oboe::convertToText(stream->getPerformanceMode()));
+    jstring formatStr = env->NewStringUTF(oboe::convertToText(stream->getFormat()));
+
+    jobject info = env->NewObject(infoClass, constructor,
+                                  api,
+                                  sharing,
+                                  performance,
+                                  static_cast<jint>(stream->getSampleRate()),
+                                  static_cast<jint>(stream->getChannelCount()),
+                                  formatStr,
+                                  static_cast<jint>(stream->getBufferSizeInFrames()),
+                                  static_cast<jint>(stream->getDeviceId()));
+
+    return info;
 }
 
 }

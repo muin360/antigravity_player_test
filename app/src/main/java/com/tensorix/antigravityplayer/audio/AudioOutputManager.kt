@@ -14,28 +14,26 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Build
+import androidx.media3.common.util.UnstableApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Dedicated Audiophile Audio Output & USB DAC Route Manager
+ * Dedicated Audiophile Audio Output \u0026 USB DAC Route Manager
  * - Scans connected USB Audio Class devices via UsbManager
  * - Monitors hotplug events via AudioDeviceCallback and USB BroadcastReceivers
- * - Calculates device capability matrix across 16/24/32-bit & 44.1-192kHz sample rates
+ * - Calculates device capability matrix across 16/24/32-bit \u0026 44.1-192kHz sample rates
  * - Constructs real-time Audiophile Signal Path Stepper and AudioFlinger limitation diagnostics
  */
+@UnstableApi
 class AudioOutputManager(private val context: Context) {
 
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
-    private val configManager = AudioOutputConfigManager.getInstance(context)
 
     private var cachedRoutes: List<AudioRouteCapability> = emptyList()
     private var cachedUsbDacs: List<UsbDacInfo> = emptyList()
-
-    private val masterSampleRates = listOf(44100, 48000, 88200, 96000, 176400, 192000)
-    private val masterBitDepths = listOf(16, 24, 32)
 
     private val _outputState = MutableStateFlow(scanOutputStateInternal())
     val outputState: StateFlow<AudioOutputState> = _outputState.asStateFlow()
@@ -171,6 +169,12 @@ class AudioOutputManager(private val context: Context) {
                     val deviceClass = device.deviceClass
                     val deviceSubclass = device.deviceSubclass
 
+                    val audioDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                    val deviceInfo = audioDevices.find { 
+                        (it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET) &&
+                        it.productName?.toString() == (prodName ?: "")
+                    }
+
                     usbList.add(
                         UsbDacInfo(
                             deviceName = device.deviceName,
@@ -182,8 +186,16 @@ class AudioOutputManager(private val context: Context) {
                             deviceSubclass = deviceSubclass,
                             interfaceCount = interfaceCount,
                             isAudioClassCompliant = true,
-                            supportedSampleRates = masterSampleRates, // Use rates from capability manager
-                            supportedBitDepths = masterBitDepths
+                            supportedSampleRates = deviceInfo?.sampleRates?.filter { it > 0 }?.sorted() ?: emptyList(),
+                            supportedBitDepths = deviceInfo?.encodings?.map { enc ->
+                                when (enc) {
+                                    android.media.AudioFormat.ENCODING_PCM_16BIT -> 16
+                                    android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> 24
+                                    android.media.AudioFormat.ENCODING_PCM_32BIT -> 32
+                                    android.media.AudioFormat.ENCODING_PCM_FLOAT -> 32
+                                    else -> 0
+                                }
+                            }?.filter { it > 0 }?.distinct()?.sorted() ?: emptyList()
                         )
                     )
                 }
@@ -211,49 +223,45 @@ class AudioOutputManager(private val context: Context) {
         val routes = cachedRoutes
         val usbDacs = cachedUsbDacs
 
-        // Prioritize external audiophile routes: USB DAC > Wired Headset > Bluetooth > Speaker
-        val activeRoute = routes.firstOrNull { it.routeType == AudioOutputRouteType.USB_DAC || it.routeType == AudioOutputRouteType.USB_DEVICE }
-            ?: routes.firstOrNull { it.routeType == AudioOutputRouteType.WIRED_HEADPHONES || it.routeType == AudioOutputRouteType.WIRED_HEADSET }
-            ?: routes.firstOrNull { it.routeType == AudioOutputRouteType.BLUETOOTH_A2DP || it.routeType == AudioOutputRouteType.HDMI }
-            ?: routes.firstOrNull { it.routeType != AudioOutputRouteType.SPEAKER }
-            ?: routes.firstOrNull()
+        // 1. Identify ACTUALLY ACTIVE route from system
+        val activeDevice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull { it.isSink }
+        } else null
+        
+        // Correlate with cached capabilities
+        val activeRoute = activeDevice?.let { dev ->
+            val devName = dev.productName?.toString() ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) dev.address else null
+            routes.find { it.deviceName == (devName ?: it.routeType.displayName) }
+        } ?: routes.firstOrNull { it.routeType == AudioOutputRouteType.USB_DAC || it.routeType == AudioOutputRouteType.USB_DEVICE }
+          ?: routes.firstOrNull { it.routeType == AudioOutputRouteType.WIRED_HEADPHONES || it.routeType == AudioOutputRouteType.WIRED_HEADSET }
+          ?: routes.firstOrNull()
 
-        val verifiedReport = HardwareHiFiVerifier.probeHardwareState(
+        // 2. Build Canonical Runtime Snapshot
+        val currentTrack = trackInfo ?: AudioTrackInfo()
+        val runtimeSnapshot = AudioVerificationEngine.buildRuntimeSnapshot(
             context = context,
-            trackSampleRate = trackInfo?.sampleRateHz ?: 0,
-            trackBitDepth = trackInfo?.bitDepth ?: 16,
-            isDspBypassed = !isDspActive
+            trackInfo = currentTrack,
+            isDspActive = isDspActive,
+            activeRoute = activeRoute
         )
 
-        val sampleRate = verifiedReport.actualOutputSampleRate
+        val sampleRate = runtimeSnapshot.actualOutputFormat.sampleRate.value
+        val bitDepth = runtimeSnapshot.actualOutputFormat.bitDepth.value
+        val limitations = runtimeSnapshot.bitPerfectEvidence.let { if (it.isNotEmpty()) listOf(it) else emptyList() }
         
-        // Dynamic Bit Depth detection based on user configuration
-        val config = activeRoute?.let { configManager.getConfigForDevice(it.routeType) }
-        val bitDepth = config?.bitDepth ?: (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) 32 else 24)
-
-        val limitations = verifiedReport.limitations
-        
-        // Calculate real latency (estimated based on buffer properties)
-        val framesPerBuffer = verifiedReport.actualOutputFramesPerBuffer
-        val latencyMs = (framesPerBuffer.toDouble() / sampleRate.toDouble() * 1000.0 * (config?.bufferSizeMultiplier ?: 2)).toInt()
-
-        val bitPerfectPossible = verifiedReport.isDirectOutputSupported
-
-        val bitPerfectState = when {
-            verifiedReport.isBitPerfectVerified -> BitPerfectState.BYPASS_DSP
-            verifiedReport.isDirectOutputSupported && isDspActive -> BitPerfectState.DSP_ACTIVE
-            verifiedReport.isDirectOutputSupported && activeRoute?.routeType == AudioOutputRouteType.USB_DAC -> BitPerfectState.ACTIVE_DIRECT
-            else -> BitPerfectState.AUDIOFLINGER_MIXED
-        }
+        // 3. Map Snapshot back to existing UI model for compatibility
+        val bitPerfectState = runtimeSnapshot.bitPerfectState
+        val bitPerfectPossible = runtimeSnapshot.directPlaybackActive.value
 
         val routeName = activeRoute?.productName ?: activeRoute?.deviceName ?: "System Audio Output"
-        val playbackPath = if (verifiedReport.isDirectOutputSupported) {
+        val playbackPath = if (runtimeSnapshot.directPlaybackActive.value) {
             if (isDspActive) "64-bit Audiophile DSP ➔ Direct Hardware HAL ➔ $routeName"
             else "Direct Bit-Perfect Path ➔ $routeName"
         } else {
             "AudioFlinger System Mixer ($sampleRate Hz) ➔ $routeName"
         }
-        val signalStages = buildSignalPathStages(trackInfo, isDspActive, activeRoute, bitPerfectState)
+        
+        val signalStages = buildSignalPathStages(currentTrack, isDspActive, activeRoute, bitPerfectState)
 
         return AudioOutputState(
             activeRoute = activeRoute,
@@ -264,10 +272,11 @@ class AudioOutputManager(private val context: Context) {
             playbackPath = playbackPath,
             bitPerfectState = bitPerfectState,
             bitPerfectPossible = bitPerfectPossible,
-            resamplingRequired = limitations.any { it.contains("resample", ignoreCase = true) },
+            resamplingRequired = runtimeSnapshot.resamplerState.value == "ACTIVE",
             signalPathStages = signalStages,
             deviceLimitations = limitations,
-            latencyMs = latencyMs
+            latencyMs = 0, // Should be measured at runtime
+            runtimeSnapshot = runtimeSnapshot
         )
     }
 
@@ -278,7 +287,7 @@ class AudioOutputManager(private val context: Context) {
     fun currentSnapshot(trackInfo: AudioTrackInfo? = null, isDspActive: Boolean = true): AudiophilePlaybackSnapshot {
         val outputState = scanOutputStateInternal(trackInfo, isDspActive)
         val info = trackInfo ?: AudioTrackInfo()
-        val isMixer = outputState.bitPerfectState == BitPerfectState.AUDIOFLINGER_MIXED || outputState.bitPerfectState == BitPerfectState.UNSUPPORTED
+        val isMixer = outputState.bitPerfectState == BitPerfectState.FAILED || outputState.bitPerfectState == BitPerfectState.UNAVAILABLE
         val quality = AudioQualityState.evaluate(
             sourceCodec = info.codec,
             sourceSampleRate = info.sampleRateHz,
@@ -297,11 +306,11 @@ class AudioOutputManager(private val context: Context) {
     private fun buildPlaybackPath(route: AudioRouteCapability?, state: BitPerfectState): String {
         val routeName = route?.productName ?: route?.deviceName ?: "System Audio Output"
         return when (state) {
-            BitPerfectState.ACTIVE_DIRECT -> "Direct USB Audio Driver ➔ $routeName (Bit-Perfect)"
-            BitPerfectState.BYPASS_DSP -> "Direct AudioSink (Float Passthrough) ➔ $routeName"
-            BitPerfectState.DSP_ACTIVE -> "Parametric DSP Equalizer ➔ Float AudioSink ➔ $routeName"
-            BitPerfectState.AUDIOFLINGER_MIXED -> "Android AudioFlinger Mixer (System Resampled) ➔ $routeName"
-            BitPerfectState.UNSUPPORTED -> "Android Legacy Audio Track ➔ $routeName"
+            BitPerfectState.VERIFIED -> "Bit-Perfect Path ➔ $routeName (Verified)"
+            BitPerfectState.ACTIVE_UNVERIFIED -> "Direct Path ➔ $routeName (Unverified)"
+            BitPerfectState.ELIGIBLE -> "Eligible for Bit-Perfect ➔ $routeName"
+            BitPerfectState.REQUESTED -> "Bit-Perfect Requested ➔ $routeName"
+            else -> "Standard Android Audio Path ➔ $routeName"
         }
     }
 
@@ -376,7 +385,7 @@ class AudioOutputManager(private val context: Context) {
 
         // Stage 5: Hardware DAC / Endpoint
         val routeName = route?.productName ?: route?.deviceName ?: "Hardware Audio DAC"
-        val isHardwareBitPerfect = bitPerfectState == BitPerfectState.ACTIVE_DIRECT || bitPerfectState == BitPerfectState.BYPASS_DSP
+        val isHardwareBitPerfect = bitPerfectState == BitPerfectState.VERIFIED || bitPerfectState == BitPerfectState.ACTIVE_UNVERIFIED
         stages.add(
             SignalPathStage(
                 stageName = "5. Hardware DAC / Endpoint",
@@ -424,27 +433,29 @@ class AudioOutputManager(private val context: Context) {
 
         // Universal Direct Output Probing across API 26-34+ via HardwareHiFiVerifier
         val verifiedReport = HardwareHiFiVerifier.probeHardwareState(context)
+        val routeType = toRouteType()
+        
         val directSupport = verifiedReport.isDirectOutputSupported ||
                 verifiedReport.isVendorHiFiActive ||
-                toRouteType() == AudioOutputRouteType.USB_DAC ||
-                toRouteType() == AudioOutputRouteType.WIRED_HEADPHONES ||
-                toRouteType() == AudioOutputRouteType.WIRED_HEADSET
+                routeType == AudioOutputRouteType.USB_DAC ||
+                routeType == AudioOutputRouteType.WIRED_HEADPHONES ||
+                routeType == AudioOutputRouteType.WIRED_HEADSET
 
         val name = when {
             !productName.isNullOrBlank() -> productName.toString()
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && !address.isNullOrBlank() -> address.toString()
-            else -> toRouteType().displayName
+            else -> routeType.displayName
         }
 
         return AudioRouteCapability(
-            routeType = toRouteType(),
+            routeType = routeType,
             deviceName = name,
             productName = productName?.toString(),
-            sampleRates = sampleRates.ifEmpty { listOf(44100, 48000, 88200, 96000, 176400, 192000) }.sorted(),
-            encodings = encodings.sorted(),
-            channelCounts = channelCounts.sorted(),
+            sampleRates = sampleRates.filter { it > 0 }.sorted(),
+            encodings = encodings.filter { it > 0 }.sorted(),
+            channelCounts = channelCounts.filter { it > 0 }.sorted(),
             isDirectPlaybackCapable = directSupport,
-            canBeExclusive = directSupport && toRouteType() != AudioOutputRouteType.BLUETOOTH_A2DP
+            canBeExclusive = directSupport && routeType != AudioOutputRouteType.BLUETOOTH_A2DP
         )
     }
 }

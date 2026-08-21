@@ -20,7 +20,7 @@ object OboeBridge {
     }
 
     // Core Stream Lifecycle
-    external fun openStream(sampleRate: Int, channelCount: Int): Long
+    external fun openStream(sampleRate: Int, channelCount: Int, bitPerfectMode: Boolean): Long
     external fun write(handle: Long, audioData: FloatArray, numFrames: Int): Int
     external fun closeStream(handle: Long)
     external fun getSampleRate(handle: Long): Int
@@ -65,4 +65,17 @@ object OboeBridge {
     external fun getPeakL(handle: Long): Double
     external fun getPeakR(handle: Long): Double
     external fun getPhaseCorrelation(handle: Long): Float
+
+    data class NativeStreamInfo(
+        val api: String,
+        val sharingMode: String,
+        val performanceMode: String,
+        val sampleRate: Int,
+        val channelCount: Int,
+        val format: String,
+        val bufferSize: Int,
+        val deviceId: Int
+    )
+
+    external fun getNativeStreamInfo(handle: Long): NativeStreamInfo?
 }

@@ -261,7 +261,7 @@ fun SettingsScreen(
                     val routeType = audioSnapshot.output.activeRoute?.routeType?.displayName ?: "Internal"
                     StatusBadge(text = routeType, color = PrimaryCyan)
                     StatusBadge(text = "${audioSnapshot.output.currentPlaybackBitDepth}-BIT", color = SecondaryViolet)
-                    if (audioSnapshot.output.bitPerfectState == BitPerfectState.ACTIVE_DIRECT) {
+                    if (audioSnapshot.output.bitPerfectState == BitPerfectState.VERIFIED || audioSnapshot.output.bitPerfectState == BitPerfectState.ACTIVE_UNVERIFIED) {
                         StatusBadge(text = "DIRECT HI-RES", color = Color(0xFF00E676))
                     } else {
                         StatusBadge(text = "64-BIT DSP", color = PrimaryCyan.copy(alpha = 0.8f))

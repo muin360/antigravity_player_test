@@ -44,6 +44,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.runtime.LaunchedEffect
@@ -66,6 +67,9 @@ import androidx.media3.common.util.UnstableApi
 import com.tensorix.antigravityplayer.audio.AudioOutputRouteType
 import com.tensorix.antigravityplayer.audio.AudiophilePlaybackSnapshot
 import com.tensorix.antigravityplayer.audio.BitPerfectState
+import com.tensorix.antigravityplayer.audio.AudioEvidence
+import com.tensorix.antigravityplayer.audio.Confidence
+import com.tensorix.antigravityplayer.audio.EvidenceSource
 import com.tensorix.antigravityplayer.player.PlaybackService
 import com.tensorix.antigravityplayer.ui.theme.CardBackground
 import com.tensorix.antigravityplayer.ui.theme.DarkBackground
@@ -369,6 +373,41 @@ fun AudiophileInfoScreen(
         }
 
         Spacer(modifier = Modifier.height(20.dp))
+
+        // MODULE 15: Structured Evidence Log
+        val snapshotData = output.runtimeSnapshot
+        if (snapshotData != null) {
+            Text(
+                text = "TECHNICAL EVIDENCE LOG",
+                color = PrimaryCyan,
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp,
+                letterSpacing = 1.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Card(
+                colors = CardDefaults.cardColors(containerColor = CardBackground.copy(alpha = 0.4f)),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    EvidenceItem("Audio API", snapshotData.audioApi)
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = Color.White.copy(alpha = 0.05f))
+                    EvidenceItem("Sharing Mode", snapshotData.sharingMode)
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = Color.White.copy(alpha = 0.05f))
+                    EvidenceItem("Source Sample Rate", snapshotData.sourceFormat.sampleRate)
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = Color.White.copy(alpha = 0.05f))
+                    EvidenceItem("Actual Output Rate", snapshotData.actualOutputFormat.sampleRate)
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = Color.White.copy(alpha = 0.05f))
+                    EvidenceItem("Direct Path Active", snapshotData.directPlaybackActive)
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = Color.White.copy(alpha = 0.05f))
+                    EvidenceItem("DSP Status", snapshotData.dspState)
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = Color.White.copy(alpha = 0.05f))
+                    EvidenceItem("Bit-Perfect Verification", AudioEvidence(snapshotData.bitPerfectState.name, EvidenceSource.HEURISTIC, if (snapshotData.bitPerfectState == BitPerfectState.VERIFIED) Confidence.VERIFIED else Confidence.INFERRED))
+                }
+            }
+            Spacer(modifier = Modifier.height(20.dp))
+        }
 
         // MODULE 3: Audiophile Playback Pipeline Inspector Stepper
         Row(
@@ -1121,17 +1160,46 @@ fun AudiophileInfoScreen(
 }
 
 @Composable
+private fun EvidenceItem(label: String, evidence: AudioEvidence<*>) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, color = TextSecondary, fontSize = 11.sp)
+            Text(evidence.value.toString(), color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            val color = when (evidence.confidence) {
+                Confidence.VERIFIED -> Color(0xFF00E676)
+                Confidence.HIGH_CONFIDENCE -> PrimaryCyan
+                Confidence.INFERRED -> Color(0xFFFFB300)
+                else -> TextSecondary
+            }
+            Text(evidence.confidence.name, color = color, fontWeight = FontWeight.Black, fontSize = 9.sp)
+            Text("via ${evidence.source.name}", color = TextSecondary, fontSize = 8.sp)
+        }
+    }
+}
+
+@Composable
 private fun BitPerfectStatusBanner(state: BitPerfectState, path: String) {
     val (bgColor, textColor, borderBrush) = when (state) {
-        BitPerfectState.ACTIVE_DIRECT, BitPerfectState.BYPASS_DSP -> Triple(
+        BitPerfectState.VERIFIED -> Triple(
             PrimaryCyan.copy(alpha = 0.15f),
             PrimaryCyan,
             Brush.horizontalGradient(listOf(PrimaryCyan, SecondaryViolet))
         )
-        BitPerfectState.DSP_ACTIVE -> Triple(
-            SecondaryViolet.copy(alpha = 0.15f),
-            SecondaryViolet,
-            Brush.horizontalGradient(listOf(SecondaryViolet, PrimaryCyan))
+        BitPerfectState.ACTIVE_UNVERIFIED, BitPerfectState.REQUESTED, BitPerfectState.ELIGIBLE -> Triple(
+            PrimaryCyan.copy(alpha = 0.05f),
+            PrimaryCyan.copy(alpha = 0.7f),
+            Brush.horizontalGradient(listOf(PrimaryCyan.copy(alpha = 0.4f), PrimaryCyan.copy(alpha = 0.2f)))
+        )
+        BitPerfectState.FAILED, BitPerfectState.BROKEN -> Triple(
+            Color.Red.copy(alpha = 0.1f),
+            Color.Red,
+            Brush.horizontalGradient(listOf(Color.Red, SecondaryViolet))
         )
         else -> Triple(
             SurfaceDark,
@@ -1157,7 +1225,7 @@ private fun BitPerfectStatusBanner(state: BitPerfectState, path: String) {
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = if (state == BitPerfectState.ACTIVE_DIRECT || state == BitPerfectState.BYPASS_DSP) Icons.Default.CheckCircle else Icons.Default.GraphicEq,
+                    imageVector = if (state == BitPerfectState.VERIFIED) Icons.Default.CheckCircle else Icons.Default.GraphicEq,
                     contentDescription = null,
                     tint = textColor,
                     modifier = Modifier.size(24.dp)
