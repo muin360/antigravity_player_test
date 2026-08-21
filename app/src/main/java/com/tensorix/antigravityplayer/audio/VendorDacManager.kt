@@ -145,23 +145,36 @@ object VendorDacManager {
     private var detectedDacNameInternal: String = "Internal Audio HAL"
     val activeDacName: String get() = detectedDacNameInternal
 
-    private fun activateVivoHiFi(context: Context) {
-        try {
-            if (Settings.System.canWrite(context)) {
-                val cr = context.contentResolver
-                Settings.System.putInt(cr, "vivo_hifi_state", 1)
-                Settings.System.putInt(cr, "vivo_headset_hifi", 1)
-            }
-            
-            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-            audioManager?.setParameters("vivo_hifi=1")
-            audioManager?.setParameters("vivo_hifi_state=1")
-            audioManager?.setParameters("direct_pcm=1")
-            
-            Log.i(TAG, "Vivo Hi-Fi Engine Armed")
-        } catch (e: Exception) {
-            Log.w(TAG, "Vivo Hi-Fi trigger notice: ${e.message}")
+    fun prepareHardwareForDirectPlayback(context: Context, sampleRate: Int) {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        runCatching {
+            audioManager.setParameters("direct_pcm=1")
+            audioManager.setParameters("vivo_hifi_state=1")
+            audioManager.setParameters("vivo_headset_hifi=1")
+            audioManager.setParameters("sampling_rate=$sampleRate")
+            audioManager.setParameters("audio_stream_direct=true")
         }
+        // Note: setParameters() সব device-এ কাজ করে না — runCatching দিয়ে safely handle করা হচ্ছে
+    }
+
+    private fun activateVivoHiFi(context: Context): Boolean {
+        // Permission check ছাড়া Settings.System.putString() crash করতে পারে
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!Settings.System.canWrite(context)) {
+                // User-কে permission দিতে বলো, silent crash না করে
+                Log.w("VendorDacManager", "WRITE_SETTINGS permission নেই। " +
+                    "Vivo Settings → Sound & Vibration → Hi-Fi থেকে manually enable করুন।")
+                return false
+            }
+        }
+        return runCatching {
+            Settings.System.putString(
+                context.contentResolver,
+                "vivo_hifi_music_app_list",
+                context.packageName
+            )
+            true
+        }.getOrDefault(false)
     }
 
     private fun activateLgQuadDac(context: Context) {

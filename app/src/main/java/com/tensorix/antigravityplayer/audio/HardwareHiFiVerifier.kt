@@ -77,53 +77,57 @@ object HardwareHiFiVerifier {
      * Supports API 26 to 34+ correctly.
      */
     fun isHiFiCapable(context: Context): Boolean {
-        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        return checkDirectOutputSupport(context)
+    }
 
+    fun checkDirectOutputSupport(context: Context): Boolean {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
+        
         return when {
-            // API 29+ (Android 10+): Use AudioTrack.isDirectOutputSupported
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> {
+            // Android 13+ (API 33): official API
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> {
+                val format = AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                    .setSampleRate(44100)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+                    .build()
+                val attr = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .build()
+                
+                // Use reflection for getDirectPlaybackSupport to ensure it works on all build environments
                 try {
-                    val encoding = if (Build.VERSION.SDK_INT >= 31) 21 else AudioFormat.ENCODING_PCM_16BIT // 21 is ENCODING_PCM_24BIT_PACKED
+                    val method = audioManager.javaClass.getMethod("getDirectPlaybackSupport", AudioFormat::class.java, AudioAttributes::class.java)
+                    val result = method.invoke(audioManager, format, attr) as? Int ?: 0
+                    result != 0 // 0 is DIRECT_PLAYBACK_NOT_SUPPORTED
+                } catch (e: Exception) {
+                    false
+                }
+            }
+            // Android 10–12 (API 29–32): AudioTrack method
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> {
+                runCatching {
                     val format = AudioFormat.Builder()
-                        .setEncoding(@Suppress("WrongConstant") encoding)
-                        .setSampleRate(48000)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(44100)
                         .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
                         .build()
-                    val attributes = AudioAttributes.Builder()
+                    val attr = AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                         .build()
                     
-                    // Use reflection for isDirectOutputSupported to avoid compile-time issues on some environments
+                    // Reflection for isDirectOutputSupported
                     val method = AudioTrack::class.java.getMethod("isDirectOutputSupported", AudioFormat::class.java, AudioAttributes::class.java)
-                    method.invoke(null, format, attributes) as? Boolean ?: false
-                } catch (e: Exception) {
-                    // Fallback: check wired output is connected
-                    @Suppress("DEPRECATION")
-                    audioManager.isWiredHeadsetOn || audioManager.isBluetoothA2dpOn
-                }
+                    method.invoke(null, format, attr) as? Boolean ?: false
+                }.getOrDefault(false)
             }
-
-            // API 26-28 (Android 8.0-9.0): Use AudioSystem reflection
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> {
-                try {
-                    // Check if any external output is active — conservative but safe approach
-                    // Direct HAL probing is blocked by SELinux on non-rooted devices
-                    @Suppress("DEPRECATION")
-                    val isExternalOutput = audioManager.isWiredHeadsetOn || audioManager.isBluetoothA2dpOn
-                    // Also try AudioSystem.getOutput reflection as secondary check
-                    val audioSystemClass = Class.forName("android.media.AudioSystem")
-                    val getOutputMethod = audioSystemClass.getMethod("getOutput", Int::class.javaPrimitiveType)
-                    val output = getOutputMethod.invoke(null, 3 /* STREAM_MUSIC */) as? Int
-                    isExternalOutput || (output != null && output > 0)
-                } catch (e: Exception) {
-                    @Suppress("DEPRECATION")
-                    audioManager.isWiredHeadsetOn || audioManager.isBluetoothA2dpOn
-                }
+            // Android 8.0–9 (API 26–28): reflection + HAL parameters
+            else -> {
+                runCatching {
+                    val params = audioManager.getParameters("direct_pcm")
+                    params?.contains("1") == true || params?.contains("true") == true
+                }.getOrDefault(false)
             }
-
-            // API < 26: Basic check only
-            else -> @Suppress("DEPRECATION") audioManager.isWiredHeadsetOn
         }
     }
 

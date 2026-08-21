@@ -459,16 +459,16 @@ class PlaybackService : MediaSessionService() {
                     dspProcessor.isTurboMode = _hiFiEnabled.value
                     dspProcessor.ditherStrength = if (currentConfig.ditherEnabled) 1.0 else 0.0
                     dspProcessor.outputBitDepth = currentConfig.bitDepth
-                    
-                    val activeProcessors = if (_hiFiEnabled.value || isBitPerfect) emptyArray() else arrayOf(dspProcessor)
+
                     val builder = DefaultAudioSink.Builder(context)
-                        .setAudioProcessors(activeProcessors)
+                        .setAudioProcessors(if (isBitPerfect) emptyArray() else arrayOf(dspProcessor))
                     
-                    // FORCED HI-FI ARCHITECTURE:
-                    // Integer PCM (16/24/32-bit) must be used for direct audio path.
-                    // Float output disabled in Hi-Fi mode — direct_pcm HAL port does not support PCM_FLOAT
-                    val shouldEnableFloat = !isBitPerfect && !_hiFiEnabled.value && isHiFiSupported()
-                    builder.setEnableFloatOutput(shouldEnableFloat)
+                    // Float output শুধু DSP mode-এ চালু। Direct HAL-এ Integer PCM দরকার।
+                    if (!isBitPerfect && isHiFiSupported()) {
+                        builder.setEnableFloatOutput(true)
+                    } else {
+                        builder.setEnableFloatOutput(false)
+                    }
 
                     // Apply Buffer Multiplier & Alignment
                     val bufferProvider = object : DefaultAudioSink.AudioTrackBufferSizeProvider {
@@ -528,6 +528,12 @@ class PlaybackService : MediaSessionService() {
             .setSeekParameters(androidx.media3.exoplayer.SeekParameters.EXACT)
             .build()
 
+        // Bit-perfect mode active থাকলে Direct HAL-এর জন্য hardware prepare করো
+        if (_bitPerfectMode.value) {
+            val sampleRate = _currentTrackInfo.value.sampleRateHz
+            VendorDacManager.prepareHardwareForDirectPlayback(this, sampleRate)
+        }
+
         // experimentalSetDynamicSchedulingEnabled & experimentalSetOffloadSchedulingEnabled 
         // are not available in Media3 1.3.1; omitting to maintain build stability.
         
@@ -541,26 +547,20 @@ class PlaybackService : MediaSessionService() {
 
         val currentSessionId = exoPlayer.audioSessionId
         if (currentSessionId != 0) {
-            vivoAudioLayer?.onAudioSessionOpened(currentSessionId)
-            universalVendorManager?.onAudioSessionActive(currentSessionId)
             if (!_bitPerfectMode.value) {
-                equalizerEngine?.attachToAudioSession(currentSessionId)
-            } else {
-                equalizerEngine?.release()
-            }
-
-            // Do NOT send this broadcast in Hi-Fi/Direct mode.
-            // Any OEM effect daemon that receives this will attach an EffectChain to the session,
-            // permanently disqualifying it from DirectOutputThread.
-            if (!_hiFiEnabled.value) {
+                // DSP mode: AudioEffect session register করো, Vivo Hi-Fi trigger করার জন্য
                 val intent = Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
                     putExtra(AudioEffect.EXTRA_AUDIO_SESSION, currentSessionId)
                     putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
                 }
                 runCatching { sendBroadcast(intent) }
+                equalizerEngine?.attachToAudioSession(currentSessionId)
+            } else {
+                // Bit-perfect mode: AudioEffect release করো যাতে AudioPolicy hook না করে
+                equalizerEngine?.release()
             }
+            logRuntimeAudioDiagnostics(currentSessionId, audioAttributes)
         }
-        logRuntimeAudioDiagnostics(currentSessionId, audioAttributes)
 
         exoPlayer.addListener(object : Player.Listener {
             override fun onAudioSessionIdChanged(audioSessionId: Int) {
