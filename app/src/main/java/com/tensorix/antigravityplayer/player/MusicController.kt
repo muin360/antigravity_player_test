@@ -3,6 +3,7 @@ package com.tensorix.antigravityplayer.player
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -247,7 +248,8 @@ class MusicController(private val context: Context) {
 
         _queue.value = songs
         val safeIndex = startIndex.coerceIn(0, (mediaItems.size - 1).coerceAtLeast(0))
-        
+        runCatching { Log.i("STARTUP_TIMING", "T0: User requested playback for track=${songs.getOrNull(safeIndex)?.title}") }
+
         // Use setMediaItems without stop/clear to be less aggressive
         // and prevent the "lock" state.
         controller.setMediaItems(mediaItems, safeIndex, 0L)
@@ -371,6 +373,7 @@ class MusicController(private val context: Context) {
     }
 
     fun seekTo(positionMs: Long) {
+        runCatching { Log.i("SEEK", "User requested seekTo(positionMs=$positionMs)") }
         _currentPositionMs.value = positionMs
         mediaController?.seekTo(positionMs)
     }

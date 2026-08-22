@@ -141,7 +141,7 @@ public:
 extern "C" {
 
 JNIEXPORT jlong JNICALL
-Java_com_tensorix_antigravityplayer_audio_OboeBridge_openStream(JNIEnv *env, jobject thiz, jint sampleRate, jint channelCount, jboolean bitPerfectMode) {
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_openStream(JNIEnv *env, jobject thiz, jint sampleRate, jint channelCount, jboolean bitPerfectMode, jint deviceId) {
     auto *wrapper = new OboeStreamWrapper();
     wrapper->configuredSampleRate = sampleRate;
     wrapper->configuredChannelCount = channelCount;
@@ -157,6 +157,10 @@ Java_com_tensorix_antigravityplayer_audio_OboeBridge_openStream(JNIEnv *env, job
            ->setErrorCallback(wrapper)
            ->setUsage(oboe::Usage::Media)
            ->setContentType(oboe::ContentType::Music);
+
+    if (deviceId > 0) {
+        builder.setDeviceId(deviceId);
+    }
 
     if (bitPerfectMode) {
         // For bit-perfect, we insist on Exclusive mode first

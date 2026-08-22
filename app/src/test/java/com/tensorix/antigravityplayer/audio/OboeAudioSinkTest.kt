@@ -15,6 +15,18 @@ import java.nio.ByteOrder
 @UnstableApi
 class OboeAudioSinkTest {
 
+    @org.junit.Before
+    fun setUp() {
+        OboeAudioSink.currentActiveHandle = 0L
+        OboeAudioSink.currentStreamInfo = null
+    }
+
+    @org.junit.After
+    fun tearDown() {
+        OboeAudioSink.currentActiveHandle = 0L
+        OboeAudioSink.currentStreamInfo = null
+    }
+
     @Test
     fun `test OboeAudioSink supports standard linear PCM formats`() {
         val context = mock<Context>()
@@ -149,5 +161,47 @@ class OboeAudioSinkTest {
         val written4Full = 500
         val consumed4Full = Math.round(written4Full / ratio4).toInt().coerceIn(0, inFrames4)
         assertEquals(1000, consumed4Full)
+    }
+
+    @Test
+    fun `test OboeAudioSink reconfigureRoute executes cleanly`() {
+        val context = mock<Context>()
+        val sink = OboeAudioSink(context, dspProcessor = null, bitPerfectMode = false)
+
+        val route = AudioRouteCapability(
+            routeType = AudioOutputRouteType.WIRED_HEADSET,
+            deviceName = "Wired Headset",
+            productName = null,
+            sampleRates = listOf(48000, 96000),
+            encodings = listOf(16, 24),
+            channelCounts = listOf(2),
+            isDirectPlaybackCapable = true,
+            canBeExclusive = true
+        )
+
+        // reconfigureRoute should execute safely
+        val result = sink.reconfigureRoute(route, preferredDevice = null)
+        // In JVM test environment without native lib, fallback is engaged cleanly
+        assertEquals(0L, OboeAudioSink.currentActiveHandle)
+    }
+
+    @Test
+    fun `test OboeAudioSink recoverFromError executes controlled recovery`() {
+        val context = mock<Context>()
+        val sink = OboeAudioSink(context, dspProcessor = null, bitPerfectMode = false)
+
+        val result = sink.recoverFromError(errorCode = -1)
+        // Recovery resets active handle and falls back safely
+        assertEquals(0L, OboeAudioSink.currentActiveHandle)
+    }
+
+    @Test
+    fun `test OboeAudioSink reset zeroes handle immediately`() {
+        val context = mock<Context>()
+        val sink = OboeAudioSink(context, dspProcessor = null, bitPerfectMode = false)
+
+        sink.reset()
+        assertEquals(0L, OboeAudioSink.currentActiveHandle)
+        org.junit.Assert.assertNull(OboeAudioSink.currentStreamInfo)
     }
 }

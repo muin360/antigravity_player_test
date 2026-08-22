@@ -66,19 +66,43 @@ class OboeAudioSink(
     private var isSeekingOrDiscontinuous: Boolean = false
     private var preferredDevice: AudioDeviceInfo? = null
 
+    private var playerId: PlayerId? = null
+    private var clock: Clock? = null
+    private var skipSilenceEnabled: Boolean = false
+    private var lastInputFormat: Format? = null
+    private var lastSpecifiedBufferSize: Int = 0
+    private var lastOutputChannels: IntArray? = null
+    private var isFallbackActive: Boolean = false
+
     // Fallback sink ONLY used if native Oboe library is missing or device fails native open
     private var fallbackSink: DefaultAudioSink? = null
 
     private fun getOrCreateFallbackSink(): DefaultAudioSink? {
         if (fallbackSink == null) {
             runCatching {
-                Log.w(TAG_LOG, "Initializing DefaultAudioSink fallback pipeline")
-                fallbackSink = DefaultAudioSink.Builder(context)
+                Log.w(TAG_LOG, "Initializing and fully pre-configuring DefaultAudioSink fallback pipeline")
+                val sink = DefaultAudioSink.Builder(context)
                     .setAudioProcessors(if (dspProcessor != null && !bitPerfectMode) arrayOf(dspProcessor) else emptyArray())
                     .setEnableFloatOutput(!bitPerfectMode)
-                    .build().apply {
-                        listener?.let { setListener(it) }
-                    }
+                    .build()
+
+                listener?.let { sink.setListener(it) }
+                playerId?.let { sink.setPlayerId(it) }
+                clock?.let { sink.setClock(it) }
+                sink.setAudioAttributes(audioAttributes)
+                sink.setPreferredDevice(preferredDevice)
+                sink.setVolume(volume)
+                sink.setPlaybackParameters(playbackParameters)
+                sink.setSkipSilenceEnabled(skipSilenceEnabled)
+
+                lastInputFormat?.let { fmt ->
+                    sink.configure(fmt, lastSpecifiedBufferSize, lastOutputChannels)
+                }
+                if (isPlaying) {
+                    sink.play()
+                }
+                fallbackSink = sink
+                isFallbackActive = true
             }
         }
         return fallbackSink
@@ -90,10 +114,12 @@ class OboeAudioSink(
     }
 
     override fun setPlayerId(playerId: PlayerId?) {
+        this.playerId = playerId
         fallbackSink?.setPlayerId(playerId)
     }
 
     override fun setClock(clock: Clock) {
+        this.clock = clock
         fallbackSink?.setClock(clock)
     }
 
@@ -116,7 +142,19 @@ class OboeAudioSink(
         return baseTimeUs + nativeTimestampUs
     }
 
+    private var timeSinkConfiguredMs: Long = 0L
+    private var timeNativeOpenedMs: Long = 0L
+    private var timeNativeStartedMs: Long = 0L
+    private var isFirstFrameWritten: Boolean = false
+
     override fun configure(inputFormat: Format, specifiedBufferSize: Int, outputChannels: IntArray?) {
+        timeSinkConfiguredMs = android.os.SystemClock.elapsedRealtime()
+        isFirstFrameWritten = false
+
+        lastInputFormat = inputFormat
+        lastSpecifiedBufferSize = specifiedBufferSize
+        lastOutputChannels = outputChannels
+
         if (fallbackSink != null) {
             fallbackSink!!.configure(inputFormat, specifiedBufferSize, outputChannels)
             return
@@ -145,7 +183,13 @@ class OboeAudioSink(
         }
 
         if (streamHandle == 0L && OboeBridge.isAvailable) {
-            openOboeStream()
+            openOboeStream(preferredDevice?.id ?: 0)
+        }
+
+        if (streamHandle == 0L) {
+            // Native open failed during configure; pre-configure fallback sink immediately!
+            val fallback = getOrCreateFallbackSink()
+            fallback?.configure(inputFormat, specifiedBufferSize, outputChannels)
         }
 
         runCatching { Log.i(TAG_LOG, "Configured Native Oboe 64-bit Sink: $sampleRate Hz, $channelCount channels, Encoding: $pcmEncoding") }
@@ -153,6 +197,7 @@ class OboeAudioSink(
 
     override fun play() {
         isPlaying = true
+        timeNativeStartedMs = android.os.SystemClock.elapsedRealtime()
         if (streamHandle != 0L) {
             OboeBridge.startStream(streamHandle)
         }
@@ -173,6 +218,7 @@ class OboeAudioSink(
         isSeekingOrDiscontinuous = true
         startMediaTimeUs = C.TIME_UNSET
         isDraining = false
+        runCatching { Log.i("SEEK", "handleDiscontinuity: resetting media clock and flushing stream") }
         if (streamHandle != 0L) {
             OboeBridge.flushStream(streamHandle)
         }
@@ -184,6 +230,7 @@ class OboeAudioSink(
         startMediaTimeUs = C.TIME_UNSET
         isSeekingOrDiscontinuous = true
         isDraining = false
+        runCatching { Log.i("SEEK", "flush: resetting framesWritten=0 and flushing native stream") }
         if (streamHandle != 0L) {
             OboeBridge.flushStream(streamHandle)
         }
@@ -197,11 +244,15 @@ class OboeAudioSink(
         startMediaTimeUs = C.TIME_UNSET
         isSeekingOrDiscontinuous = false
         closeOboeStream()
+        currentActiveHandle = 0L
+        currentStreamInfo = null
         fallbackSink?.reset()
     }
 
     override fun release() {
         closeOboeStream()
+        currentActiveHandle = 0L
+        currentStreamInfo = null
         fallbackSink?.release()
     }
 
@@ -290,7 +341,17 @@ class OboeAudioSink(
         val framesWrittenResult = OboeBridge.write(streamHandle, floatBuffer, numFrames)
         if (framesWrittenResult > 0) {
             framesWritten += framesWrittenResult
-            
+
+            if (!isFirstFrameWritten) {
+                isFirstFrameWritten = true
+                val now = runCatching { android.os.SystemClock.elapsedRealtime() }.getOrDefault(System.currentTimeMillis())
+                val openDelta = (timeNativeOpenedMs - timeSinkConfiguredMs).coerceAtLeast(0)
+                val startDelta = (timeNativeStartedMs - timeNativeOpenedMs).coerceAtLeast(0)
+                val writeDelta = (now - timeNativeStartedMs).coerceAtLeast(0)
+                val totalStartup = (now - timeSinkConfiguredMs).coerceAtLeast(0)
+                runCatching { Log.i("STARTUP_TIMING", "sinkConfigure=${timeSinkConfiguredMs}ms nativeOpen=+${openDelta}ms nativeStart=+${startDelta}ms firstWrite=+${writeDelta}ms total=${totalStartup}ms") }
+            }
+
             val bytesPerFrame = channelCount * bytesPerSample
             val bytesConsumed = framesWrittenResult * bytesPerFrame
 
@@ -304,7 +365,7 @@ class OboeAudioSink(
 
         // Error code returned by Oboe
         val errorCode = framesWrittenResult
-        Log.e(TAG_LOG, "Oboe write failed with error code: $errorCode. Delegating recovery to AudioEngine.")
+        runCatching { Log.e(TAG_LOG, "Oboe write failed with error code: $errorCode. Delegating recovery to AudioEngine.") }
         closeOboeStream()
 
         AudioEngine.handleStreamError(errorCode, context)
@@ -389,12 +450,83 @@ class OboeAudioSink(
         }
     }
 
+    @Synchronized
+    fun reconfigureRoute(newRoute: AudioRouteCapability? = null, preferredDevice: AudioDeviceInfo? = null): Boolean {
+        val oldHandle = streamHandle
+        val oldDeviceId = currentStreamInfo?.deviceId ?: 0
+        val targetDeviceId = preferredDevice?.id ?: 0
+        runCatching { Log.i(TAG_LOG, "[OBOE_RECONFIG] oldHandle=$oldHandle oldDevice=$oldDeviceId newRoute=${newRoute?.routeType?.displayName} newDevice=$targetDeviceId") }
+
+        this.preferredDevice = preferredDevice
+
+        // 1. Pause and flush current stream if active
+        if (streamHandle != 0L) {
+            OboeBridge.pauseStream(streamHandle)
+            OboeBridge.flushStream(streamHandle)
+            closeOboeStream()
+        }
+
+        // 2. Clear fallback if we're trying to re-engage native stream on new route
+        if (fallbackSink != null) {
+            fallbackSink?.pause()
+            fallbackSink?.flush()
+            fallbackSink?.reset()
+            fallbackSink = null
+            isFallbackActive = false
+        }
+
+        // 3. Open on new physical device
+        if (OboeBridge.isAvailable) {
+            openOboeStream(targetDeviceId)
+        }
+
+        if (streamHandle != 0L) {
+            if (isPlaying) {
+                OboeBridge.startStream(streamHandle)
+            }
+            runCatching { Log.i(TAG_LOG, "[OBOE_RECONFIG] Successfully re-engaged native Oboe stream on new route (Handle=$streamHandle, DeviceId=${currentStreamInfo?.deviceId})") }
+            return true
+        } else {
+            runCatching { Log.w(TAG_LOG, "[OBOE_RECONFIG] Native Oboe open failed on new route; pre-configuring fallback sink") }
+            val fallback = getOrCreateFallbackSink()
+            if (isPlaying) {
+                fallback?.play()
+            }
+            return false
+        }
+    }
+
+    @Synchronized
+    fun recoverFromError(errorCode: Int): Boolean {
+        runCatching { Log.w(TAG_LOG, "[RECOVERY] Initiating controlled sink recovery for errorCode=$errorCode") }
+        closeOboeStream()
+
+        if (OboeBridge.isAvailable) {
+            openOboeStream(preferredDevice?.id ?: 0)
+        }
+
+        if (streamHandle != 0L) {
+            if (isPlaying) {
+                OboeBridge.startStream(streamHandle)
+            }
+            runCatching { Log.i(TAG_LOG, "[RECOVERY] Successfully recovered via native Oboe stream reopen (Handle=$streamHandle)") }
+            return true
+        } else {
+            runCatching { Log.w(TAG_LOG, "[RECOVERY] Native reopen failed; falling back to DefaultAudioSink") }
+            val fallback = getOrCreateFallbackSink()
+            if (isPlaying) {
+                fallback?.play()
+            }
+            return false
+        }
+    }
+
     fun setBitPerfectMode(enabled: Boolean) {
         if (this.bitPerfectMode != enabled) {
             this.bitPerfectMode = enabled
             if (streamHandle != 0L) {
                 closeOboeStream()
-                openOboeStream()
+                openOboeStream(preferredDevice?.id ?: 0)
                 if (streamHandle != 0L && isPlaying) {
                     OboeBridge.startStream(streamHandle)
                 }
@@ -402,18 +534,22 @@ class OboeAudioSink(
         }
     }
 
-    private fun openOboeStream() {
+    private fun openOboeStream(deviceId: Int = 0) {
         if (OboeBridge.isAvailable && streamHandle == 0L) {
-            streamHandle = OboeBridge.openStream(sampleRate, channelCount, bitPerfectMode)
-            if (streamHandle != 0L) {
-                currentActiveHandle = streamHandle
-                currentStreamInfo = OboeBridge.getNativeStreamInfo(streamHandle)
-                val exclusive = OboeBridge.isExclusive(streamHandle)
-                val actualRate = OboeBridge.getSampleRate(streamHandle)
-                runCatching { Log.i(TAG_LOG, "✦ Native Oboe Stream Opened: Handle=$streamHandle, Exclusive=$exclusive, Rate=$actualRate Hz, BitPerfect=$bitPerfectMode ✦") }
-                
+            val targetDevice = if (deviceId > 0) deviceId else (preferredDevice?.id ?: 0)
+            val handle = OboeBridge.openStream(sampleRate, channelCount, bitPerfectMode, targetDevice)
+            if (handle != 0L) {
+                timeNativeOpenedMs = android.os.SystemClock.elapsedRealtime()
+                streamHandle = handle
+                currentActiveHandle = handle
+                currentStreamInfo = OboeBridge.getNativeStreamInfo(handle)
+                val exclusive = OboeBridge.isExclusive(handle)
+                val actualRate = OboeBridge.getSampleRate(handle)
+                runCatching { Log.i(TAG_LOG, "✦ Native Oboe Stream Opened: Handle=$streamHandle, Exclusive=$exclusive, Rate=$actualRate Hz, DeviceId=$targetDevice, BitPerfect=$bitPerfectMode ✦") }
+
                 syncDspParameters(streamHandle)
                 onExclusiveModeChanged(exclusive)
+                AudioEngine.invalidate()
             }
         }
     }
@@ -478,13 +614,14 @@ class OboeAudioSink(
     }
 
     private fun closeOboeStream() {
-        if (streamHandle != 0L) {
-            OboeBridge.closeStream(streamHandle)
-            if (currentActiveHandle == streamHandle) {
+        val handleToClose = streamHandle
+        if (handleToClose != 0L) {
+            streamHandle = 0L
+            if (currentActiveHandle == handleToClose) {
                 currentActiveHandle = 0L
                 currentStreamInfo = null
             }
-            streamHandle = 0L
+            OboeBridge.closeStream(handleToClose)
             AudioEngine.invalidate()
         }
     }

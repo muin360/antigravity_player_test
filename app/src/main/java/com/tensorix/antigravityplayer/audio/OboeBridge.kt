@@ -20,7 +20,7 @@ object OboeBridge {
     }
 
     // Core Stream Lifecycle
-    external fun openStream(sampleRate: Int, channelCount: Int, bitPerfectMode: Boolean): Long
+    external fun openStream(sampleRate: Int, channelCount: Int, bitPerfectMode: Boolean, deviceId: Int = 0): Long
     external fun write(handle: Long, audioData: FloatArray, numFrames: Int): Int
     external fun flushStream(handle: Long)
     external fun pauseStream(handle: Long)

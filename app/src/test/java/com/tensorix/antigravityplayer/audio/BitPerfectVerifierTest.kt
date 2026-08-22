@@ -17,6 +17,12 @@ class BitPerfectVerifierTest {
         OboeAudioSink.currentActiveHandle = 12345L
     }
 
+    @org.junit.After
+    fun tearDown() {
+        OboeAudioSink.currentActiveHandle = 0L
+        OboeAudioSink.currentStreamInfo = null
+    }
+
     // ========================================================================
     // MANDATORY REAL-DEVICE STATE SCENARIO TESTS (Section 12)
     // ========================================================================

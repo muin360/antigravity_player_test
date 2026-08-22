@@ -50,7 +50,14 @@ class AudioOutputManager(private val context: Context) {
             updateCache()
             val newState = scanOutputStateInternal()
             _outputState.value = newState
-            AudioEngine.reconfigureRoute(context, newState.activeRoute)
+
+            val activeDevice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).filter { it.isSink }
+                val targetType = newState.activeRoute?.routeType
+                outputDevices.firstOrNull { it.toRouteType() == targetType }
+            } else null
+
+            AudioEngine.reconfigureRoute(context, newState.activeRoute, activeDevice)
         }
     }
 

@@ -92,17 +92,25 @@ object AudioEngine {
      * Serialized non-destructive route reconfiguration.
      * Guaranteed never to rebuild ExoPlayer or drop playback queue/position.
      */
-    suspend fun reconfigureRoute(context: Context, newRoute: AudioRouteCapability?) = routeMutex.withLock {
-        runCatching { Log.i(TAG, "Reconfiguring route sequentially to: ${newRoute?.routeType?.displayName ?: "UNKNOWN"}") }
+    suspend fun reconfigureRoute(
+        context: Context,
+        newRoute: AudioRouteCapability?,
+        preferredDevice: android.media.AudioDeviceInfo? = null
+    ) = routeMutex.withLock {
+        runCatching { Log.i("ROUTE_EVENT", "oldRoute=${_activeRoute.value?.routeType?.displayName ?: "UNKNOWN"} newRoute=${newRoute?.routeType?.displayName ?: "UNKNOWN"}") }
         _activeRoute.value = newRoute
         invalidate()
 
         val service = com.tensorix.antigravityplayer.player.PlaybackService.instance
-        
-        // 1. Flush native sink if active to prevent stale audio
-        service?.activeOboeAudioSink?.flush()
+        val sink = service?.activeOboeAudioSink
+        if (sink != null) {
+            val success = sink.reconfigureRoute(newRoute, preferredDevice)
+            if (!success) {
+                runCatching { Log.w(TAG, "Native sink reconfigure engaged fallback for route: ${newRoute?.routeType?.displayName}") }
+            }
+        }
 
-        // 2. Trigger optional vendor probe in background if wired/USB
+        // Trigger optional vendor probe in background if wired/USB
         val routeType = newRoute?.routeType
         if (routeType == AudioOutputRouteType.WIRED_HEADSET ||
             routeType == AudioOutputRouteType.WIRED_HEADPHONES ||
@@ -113,16 +121,20 @@ object AudioEngine {
             runCatching { AudioInitializationCoordinator.triggerOptionalVendorProbe(appContext) }
         }
 
-        // 3. Re-evaluate snapshot and update UI
+        // Re-evaluate snapshot and update UI
         service?.refreshAudiophileState()
     }
 
     /**
      * Synchronous bridge for reconfigureRoute when calling from non-coroutine contexts.
      */
-    fun reconfigureForRouteChange(context: Context, newRoute: AudioRouteCapability?) {
+    fun reconfigureForRouteChange(
+        context: Context,
+        newRoute: AudioRouteCapability?,
+        preferredDevice: android.media.AudioDeviceInfo? = null
+    ) {
         engineScope.launch {
-            reconfigureRoute(context, newRoute)
+            reconfigureRoute(context, newRoute, preferredDevice)
         }
     }
 
@@ -130,11 +142,19 @@ object AudioEngine {
      * Single recovery authority for stream errors reported by native layer or AudioSink.
      */
     fun handleStreamError(errorCode: Int, context: Context) {
-        runCatching { Log.w(TAG, "Stream error reported: $errorCode. Executing controlled single-authority recovery.") }
+        runCatching { Log.w("RECOVERY", "reason=STREAM_ERROR_$errorCode attempt=1 result=STARTING") }
         _recoveryState.value = "RECOVERING"
         invalidate()
+
         val service = com.tensorix.antigravityplayer.player.PlaybackService.instance
-        service?.refreshAudiophileState()
+        val sink = service?.activeOboeAudioSink
+        if (sink != null) {
+            val recoveredNative = sink.recoverFromError(errorCode)
+            val resultStr = if (recoveredNative) "RECOVERED_NATIVE" else "RECOVERED_FALLBACK"
+            runCatching { Log.i("RECOVERY", "reason=STREAM_ERROR_$errorCode attempt=1 result=$resultStr") }
+        }
+
         _recoveryState.value = "NORMAL"
+        service?.refreshAudiophileState()
     }
 }
