@@ -117,6 +117,20 @@ data class UsbDacInfo(
     val supportedBitDepths: List<Int> = emptyList()
 )
 
+data class BitPerfectEvidence(
+    val description: String,
+    val isSatisfied: Boolean,
+    val source: EvidenceSource,
+    val value: String = ""
+)
+
+data class BitPerfectVerificationResult(
+    val state: BitPerfectState,
+    val evidence: List<BitPerfectEvidence>,
+    val confidence: Confidence,
+    val failureReasons: List<String>
+)
+
 data class SignalPathStage(
     val stageName: String,
     val title: String,
@@ -176,7 +190,7 @@ data class DacRuntimeState(
 data class BitPerfectRuntimeState(
     val state: BitPerfectState,
     val eligibility: Boolean,
-    val evidence: String,
+    val verificationResult: BitPerfectVerificationResult? = null,
     val confidence: Confidence
 )
 
@@ -201,7 +215,7 @@ data class AudioQualityState(
     val isLossless: Boolean = false,
     val isHiResSource: Boolean = false,
     val isHiResOutput: Boolean = false,
-    val isBitPerfect: Boolean = false
+    val bitPerfectState: BitPerfectState = BitPerfectState.UNKNOWN
 ) {
     companion object {
         fun evaluate(
@@ -210,7 +224,7 @@ data class AudioQualityState(
             sourceBitDepth: Int,
             actualOutputSampleRate: Int,
             actualOutputBitDepth: Int,
-            isAudioFlingerMixer: Boolean
+            bitPerfectState: BitPerfectState
         ): AudioQualityState {
             val cleanCodec = sourceCodec.uppercase()
             val isLossless = cleanCodec.contains("FLAC") ||
@@ -225,15 +239,12 @@ data class AudioQualityState(
 
             val isHiResSource = (sourceBitDepth >= 24) || (sourceSampleRate >= 88200)
             val isHiResOutput = (actualOutputSampleRate >= 88200) && (actualOutputBitDepth >= 24)
-            val isBitPerfect = (sourceSampleRate == actualOutputSampleRate) &&
-                    (sourceBitDepth == actualOutputBitDepth) &&
-                    !isAudioFlingerMixer
 
             return AudioQualityState(
                 isLossless = isLossless,
                 isHiResSource = isHiResSource,
                 isHiResOutput = isHiResOutput,
-                isBitPerfect = isBitPerfect
+                bitPerfectState = bitPerfectState
             )
         }
     }
@@ -249,13 +260,11 @@ data class AudioTrackInfo(
     val channels: Int = 2,
     val isHiResSource: Boolean = (bitDepth >= 24 || sampleRateHz >= 88200),
     val isHiRes: Boolean = (bitDepth >= 24 || sampleRateHz >= 88200),
-    val quality: AudioQualityState = AudioQualityState.evaluate(
-        sourceCodec = codec,
-        sourceSampleRate = sampleRateHz,
-        sourceBitDepth = bitDepth,
-        actualOutputSampleRate = 48000,
-        actualOutputBitDepth = 16,
-        isAudioFlingerMixer = true
+    val quality: AudioQualityState = AudioQualityState(
+        isLossless = false,
+        isHiResSource = (bitDepth >= 24 || sampleRateHz >= 88200),
+        isHiResOutput = false,
+        bitPerfectState = BitPerfectState.UNKNOWN
     )
 )
 

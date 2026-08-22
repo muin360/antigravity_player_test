@@ -9,23 +9,20 @@ import com.tensorix.antigravityplayer.player.PlaybackService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
+import androidx.media3.common.util.UnstableApi
+
 /**
  * MODULE 8 — BIT‑PERFECT ANALYZER
  *
- * Scans the current audio path and validates true bit‑perfect playback:
- *  • Sample‑rate conversion status
- *  • Bit‑depth preservation (32‑bit Float output)
- *  • DSP bypass state (no active AudioEffect chain)
- *  • AudioSink hardware fallback detection
- *
- * The analyser exposes a [VerificationStatus] that can be observed by UI
- * components to display VERIFIED, LIKELY, POSSIBLE or IMPOSSIBLE states.
+ * Scans the current audio path and validates true bit‑perfect playback.
+ * Delegates to BitPerfectVerifier for authoritative verification.
  */
+@UnstableApi
 class BitPerfectAnalyzer private constructor(private val context: Context) {
 
     enum class VerificationStatus {
         VERIFIED_BIT_PERFECT,
-        LIKELY,
+        ACTIVE_UNVERIFIED,
         POSSIBLE,
         IMPOSSIBLE
     }
@@ -33,8 +30,8 @@ class BitPerfectAnalyzer private constructor(private val context: Context) {
     private val _status = MutableStateFlow(VerificationStatus.POSSIBLE)
     val status: StateFlow<VerificationStatus> = _status
 
-    private val _phaseCorrelation = MutableStateFlow(1.0f)
-    val phaseCorrelation: StateFlow<Float> = _phaseCorrelation
+    private val _verificationResult = MutableStateFlow<BitPerfectVerificationResult?>(null)
+    val verificationResult: StateFlow<BitPerfectVerificationResult?> = _verificationResult
 
     companion object {
         @Volatile
@@ -50,55 +47,23 @@ class BitPerfectAnalyzer private constructor(private val context: Context) {
      */
     fun evaluate() {
         try {
-            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            val currentTrack = PlaybackService.instance?.currentTrackInfo?.value
-            val isDspBypassed = isDspBypassed()
+            val service = PlaybackService.instance ?: return
+            val snapshot = AudioEngineController.snapshot.value ?: return
+            val dsp = service.dspProcessor
+            val hrtfEnabled = service.equalizerEngine?.hrtfSpatialEnabled?.value ?: false
 
-            val verifiedReport = HardwareHiFiVerifier.probeHardwareState(
-                context = context,
-                trackSampleRate = currentTrack?.sampleRateHz ?: 0,
-                trackBitDepth = currentTrack?.bitDepth ?: 16,
-                isDspBypassed = isDspBypassed
-            )
+            val result = BitPerfectVerifier.verify(snapshot, dsp, hrtfEnabled)
+            _verificationResult.value = result
 
-            _status.value = if (verifiedReport.isBitPerfectVerified) {
-                VerificationStatus.VERIFIED_BIT_PERFECT
-            } else {
-                VerificationStatus.IMPOSSIBLE
+            _status.value = when (result.state) {
+                BitPerfectState.VERIFIED -> VerificationStatus.VERIFIED_BIT_PERFECT
+                BitPerfectState.ACTIVE_UNVERIFIED -> VerificationStatus.ACTIVE_UNVERIFIED
+                BitPerfectState.ELIGIBLE, BitPerfectState.REQUESTED -> VerificationStatus.POSSIBLE
+                else -> VerificationStatus.IMPOSSIBLE
             }
         } catch (e: Exception) {
             Log.e("BitPerfectAnalyzer", "Evaluation failed", e)
             _status.value = VerificationStatus.IMPOSSIBLE
-        }
-    }
-
-    private fun isUsingFloatSink(audioManager: AudioManager): Boolean {
-        return try {
-            android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    private fun isSampleRateMatched(audioManager: AudioManager): Boolean {
-        return try {
-            val outputRate = audioManager.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toIntOrNull()
-            outputRate != null && outputRate >= 44100
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    private fun isDspBypassed(): Boolean {
-        return PlaybackService.instance?.bitPerfectMode?.value ?: true
-    }
-
-    private fun isHardwareFallback(audioManager: AudioManager): Boolean {
-        return try {
-            val outputRate = audioManager.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toIntOrNull()
-            outputRate != null && outputRate < 44100
-        } catch (e: Exception) {
-            false
         }
     }
 }

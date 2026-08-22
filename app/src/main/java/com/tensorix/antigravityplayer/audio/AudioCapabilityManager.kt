@@ -21,12 +21,6 @@ class AudioCapabilityManager(private val context: Context) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
 
-    val masterSampleRates: List<Int> = listOf(
-        44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000
-    )
-
-    val masterBitDepths: List<Int> = listOf(16, 24, 32)
-
     fun inspectDeviceCapabilities(): DeviceAudioCapabilities {
         val outputDevices = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
@@ -66,6 +60,16 @@ class AudioCapabilityManager(private val context: Context) {
                     val prodName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                         runCatching { device.productName }.getOrNull()
                     } else null
+                    
+                    // Blocker 4: USB capabilities must be evidence-based
+                    val audioDevices = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                    } else emptyArray()
+                    
+                    val deviceInfo = audioDevices.find { 
+                        (it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET) &&
+                        it.productName?.toString() == (prodName ?: "")
+                    }
 
                     usbList.add(
                         UsbDacInfo(
@@ -78,8 +82,16 @@ class AudioCapabilityManager(private val context: Context) {
                             deviceSubclass = device.deviceSubclass,
                             interfaceCount = device.interfaceCount,
                             isAudioClassCompliant = true,
-                            supportedSampleRates = masterSampleRates,
-                            supportedBitDepths = masterBitDepths
+                            supportedSampleRates = deviceInfo?.sampleRates?.filter { it > 0 }?.sorted() ?: emptyList(),
+                            supportedBitDepths = deviceInfo?.encodings?.map { enc ->
+                                when (enc) {
+                                    AudioFormat.ENCODING_PCM_16BIT -> 16
+                                    AudioFormat.ENCODING_PCM_24BIT_PACKED -> 24
+                                    AudioFormat.ENCODING_PCM_32BIT -> 32
+                                    AudioFormat.ENCODING_PCM_FLOAT -> 32
+                                    else -> 0
+                                }
+                            }?.filter { it > 0 }?.distinct()?.sorted() ?: emptyList()
                         )
                     )
                 }
@@ -142,9 +154,9 @@ class AudioCapabilityManager(private val context: Context) {
             routeType = toRouteType(),
             deviceName = name,
             productName = productName?.toString(),
-            sampleRates = sampleRates.ifEmpty { listOf(44100, 48000, 88200, 96000, 176400, 192000) }.sorted(),
-            encodings = encodings.sorted(),
-            channelCounts = channelCounts.sorted(),
+            sampleRates = sampleRates.filter { it > 0 }.sorted(),
+            encodings = encodings.filter { it > 0 }.sorted(),
+            channelCounts = channelCounts.filter { it > 0 }.sorted(),
             isDirectPlaybackCapable = direct,
             canBeExclusive = direct && toRouteType() != AudioOutputRouteType.BLUETOOTH_A2DP
         )

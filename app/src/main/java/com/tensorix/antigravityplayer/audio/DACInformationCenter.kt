@@ -41,64 +41,43 @@ class DACInformationCenter(private val context: Context) {
     private val _currentDacInfo = MutableStateFlow(DacInformationReport())
     val currentDacInfo: StateFlow<DacInformationReport> = _currentDacInfo.asStateFlow()
 
+    @androidx.media3.common.util.UnstableApi
     fun inspectDac(
         activeRoute: AudioRouteCapability?,
         trackInfo: AudioTrackInfo?,
         isBitPerfectBypass: Boolean = false
     ): DacInformationReport {
-        val verifiedReport = HardwareHiFiVerifier.probeHardwareState(
+        val snapshot = AudioVerificationEngine.buildCanonicalSnapshot(
             context = context,
-            trackSampleRate = trackInfo?.sampleRateHz ?: 0,
-            trackBitDepth = trackInfo?.bitDepth ?: 16,
-            isDspBypassed = isBitPerfectBypass
+            trackInfo = trackInfo ?: AudioTrackInfo(),
+            isDspActive = !isBitPerfectBypass,
+            activeRoute = activeRoute,
+            dspProcessor = com.tensorix.antigravityplayer.player.PlaybackService.instance?.dspProcessor
         )
 
-        val sampleRate = verifiedReport.actualOutputSampleRate
-        val sampleRateKhz = "${sampleRate / 1000.0} kHz"
-        val bitDepth = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) 32 else 24
-        val activeFormat = "$bitDepth-bit / $sampleRateKhz"
+        val dacState = snapshot.dac
+        val activeFormat = "${snapshot.actualOutput.bitDepth.value}-bit / ${snapshot.actualOutput.sampleRate.value / 1000.0} kHz"
 
-        val connectedUsbDac = scanUsbDac()
-
-        val report = if (connectedUsbDac != null) {
-            val mfg = connectedUsbDac.manufacturerName ?: "Audiophile USB Hardware"
-            val prod = connectedUsbDac.productName ?: "USB Audio Class 2.0 DAC"
-            DacInformationReport(
-                dacName = prod,
-                dacVendor = mfg,
-                dacModel = "USB Audio Class Device ($prod)",
-                dacArchitecture = "External USB Audio DAC",
-                supportedFormats = listOf("PCM", "FLAC", "ALAC", "WAV", "DSD", "DXD"),
-                supportedSampleRates = listOf(44100, 48000, 88200, 96000, 176400, 192000),
-                supportedBitDepths = listOf(16, 24, 32),
-                maxCapabilities = "USB Audio Class Compliant Output",
-                currentOperatingMode = if (verifiedReport.isBitPerfectVerified) "Bit-Perfect Direct USB Passthrough" else "32-bit Float AudioSink",
-                currentActiveFormat = activeFormat,
-                isExternalUsbDac = true,
-                usbVendorId = connectedUsbDac.vendorId,
-                usbProductId = connectedUsbDac.productId
-            )
-        } else {
-            val socDacName = verifiedReport.activeDacName
-            val dacVendorName = verifiedReport.dacVendor
-
-            DacInformationReport(
-                dacName = socDacName,
-                dacVendor = dacVendorName,
-                dacModel = if (verifiedReport.isVendorHiFiActive) "Dedicated Hi-Fi Hardware Architecture" else "Standard Android Audio HAL",
-                dacArchitecture = if (verifiedReport.isVendorHiFiActive) "Dedicated Mobile Hi-Fi DAC" else "SoC Integrated Audio Codec",
-                supportedFormats = listOf("PCM", "FLAC", "ALAC", "WAV"),
-                supportedSampleRates = listOf(44100, 48000),
-                supportedBitDepths = listOf(16, 24, 32),
-                maxCapabilities = if (verifiedReport.isDirectOutputSupported) "Direct AudioTrack HAL Supported" else "AudioFlinger Mixed Output (48kHz)",
-                currentOperatingMode = verifiedReport.audioThreadType.displayName,
-                currentActiveFormat = activeFormat,
-                isExternalUsbDac = false
-            )
-        }
-
-        _currentDacInfo.value = report
-        return report
+        return DacInformationReport(
+            dacName = dacState.modelName.value,
+            dacVendor = dacState.vendor.value,
+            dacModel = if (snapshot.dac.isActive.value) "Dedicated Hi-Fi Hardware" else "Integrated Audio Path",
+            dacArchitecture = if (snapshot.dac.isActive.value) "High-Performance Discrete DAC" else "SoC PMIC Codec",
+            supportedFormats = listOf("PCM", "FLAC", "ALAC", "WAV", "DSD"),
+            supportedSampleRates = activeRoute?.sampleRates ?: emptyList(),
+            supportedBitDepths = activeRoute?.encodings?.map { 
+                when(it) {
+                    android.media.AudioFormat.ENCODING_PCM_16BIT -> 16
+                    else -> 24
+                }
+            } ?: emptyList(),
+            maxCapabilities = "Format: ${snapshot.actualOutput.encoding.value}",
+            currentOperatingMode = if (snapshot.bitPerfect.state == BitPerfectState.VERIFIED) "BIT-PERFECT" else snapshot.audioApi.value.label,
+            currentActiveFormat = activeFormat,
+            isExternalUsbDac = snapshot.activeRoute.value == AudioOutputRouteType.USB_DAC,
+            usbVendorId = 0,
+            usbProductId = 0
+        )
     }
 
     private fun scanUsbDac(): UsbDacInfo? {

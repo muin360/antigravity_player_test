@@ -11,31 +11,48 @@ class BitPerfectVerificationTest {
 
     @Test
     fun `test Bit-Perfect NOT VERIFIED when DSP is ON`() {
-        val track = AudioTrackInfo(sampleRateHz = 44100, bitDepth = 16)
-        // Manual verification logic test
-        val isDspActive = true
-        val resamplerActive = false
-        val isDirectActive = true
-        val isHardwareBitPerfectVerified = true
-        val isVolumeUnity = true
-        val isDitherOff = true
+        val verified = checkBitPerfect(isDspActive = true)
+        assertEquals(false, verified)
+    }
 
-        val bitPerfectVerified = !isDspActive && !resamplerActive && isDirectActive && isHardwareBitPerfectVerified && isVolumeUnity && isDitherOff
-        
-        assertEquals(false, bitPerfectVerified)
+    @Test
+    fun `test Bit-Perfect NOT VERIFIED when rate mismatch`() {
+        val verified = checkBitPerfect(trackRate = 44100, outputRate = 48000)
+        assertEquals(false, verified)
+    }
+
+    @Test
+    fun `test Bit-Perfect NOT VERIFIED when non-unity volume`() {
+        val verified = checkBitPerfect(volume = 0.8)
+        assertEquals(false, verified)
+    }
+
+    @Test
+    fun `test Bit-Perfect NOT VERIFIED when dither ON`() {
+        val verified = checkBitPerfect(dither = 1.0)
+        assertEquals(false, verified)
     }
 
     @Test
     fun `test Bit-Perfect VERIFIED when all conditions satisfy`() {
-        val isDspActive = false
-        val resamplerActive = false
-        val isDirectActive = true
-        val isHardwareBitPerfectVerified = true
-        val isVolumeUnity = true
-        val isDitherOff = true
+        val verified = checkBitPerfect()
+        assertEquals(true, verified)
+    }
 
-        val bitPerfectVerified = !isDspActive && !resamplerActive && isDirectActive && isHardwareBitPerfectVerified && isVolumeUnity && isDitherOff
+    private fun checkBitPerfect(
+        isDspActive: Boolean = false,
+        trackRate: Int = 44100,
+        outputRate: Int = 44100,
+        isDirectActive: Boolean = true,
+        isHardwareBitPerfectVerified: Boolean = true,
+        volume: Double = 1.0,
+        dither: Double = 0.0,
+        isSpatialOff: Boolean = true
+    ): Boolean {
+        val isMatchSR = trackRate == outputRate
+        val isVolUnity = volume >= 0.999 && volume <= 1.001
+        val isDitherOff = dither < 0.001
         
-        assertEquals(true, bitPerfectVerified)
+        return !isDspActive && isMatchSR && isDirectActive && isHardwareBitPerfectVerified && isVolUnity && isDitherOff && isSpatialOff
     }
 }

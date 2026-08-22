@@ -17,8 +17,6 @@ import kotlinx.coroutines.flow.asStateFlow
 @UnstableApi
 class HiFiAudioEngine(private val context: Context) {
 
-    private val capabilityManager = AudioCapabilityManager(context)
-
     private val _engineState = MutableStateFlow(HiFiEngineState())
     val engineState: StateFlow<HiFiEngineState> = _engineState.asStateFlow()
 
@@ -37,36 +35,19 @@ class HiFiAudioEngine(private val context: Context) {
         return builder.build()
     }
 
-    fun updatePlaybackFormat(trackInfo: AudioTrackInfo, isBitPerfect: Boolean) {
-        val caps = capabilityManager.inspectDeviceCapabilities()
-        val optimalSampleRate = matchOptimalSampleRate(trackInfo.sampleRateHz, caps.maxHardwareSampleRate)
-        val optimalBitDepth = if (caps.isFloatSinkSupported) 32 else 24
-
+    fun updatePlaybackFormat(trackInfo: AudioTrackInfo) {
+        val snapshot = AudioEngineController.snapshot.value ?: return
+        
         _engineState.value = HiFiEngineState(
             sourceFormat = trackInfo.codec,
             sourceBitDepth = trackInfo.bitDepth,
             sourceSampleRate = trackInfo.sampleRateHz,
-            activeOutputSampleRate = optimalSampleRate,
-            activeOutputBitDepth = optimalBitDepth,
-            isFloatOutputActive = caps.isFloatSinkSupported,
-            isBitPerfectActive = isBitPerfect && (optimalSampleRate == trackInfo.sampleRateHz),
+            activeOutputSampleRate = snapshot.actualOutput.sampleRate.value,
+            activeOutputBitDepth = snapshot.actualOutput.bitDepth.value,
+            isFloatOutputActive = snapshot.actualOutput.encoding.value.contains("Float"),
+            isBitPerfectActive = snapshot.bitPerfect.state == BitPerfectState.VERIFIED,
             audioEngineName = "Antigravity Audiophile Media3 Core"
         )
-    }
-
-    private fun matchOptimalSampleRate(sourceRate: Int, maxHardwareRate: Int): Int {
-        if (sourceRate <= 0) return 48000
-        return when {
-            sourceRate <= maxHardwareRate -> sourceRate
-            sourceRate >= 384000 && maxHardwareRate >= 384000 -> 384000
-            sourceRate >= 352800 && maxHardwareRate >= 352800 -> 352800
-            sourceRate >= 192000 && maxHardwareRate >= 192000 -> 192000
-            sourceRate >= 176400 && maxHardwareRate >= 176400 -> 176400
-            sourceRate >= 96000 && maxHardwareRate >= 96000 -> 96000
-            sourceRate >= 88200 && maxHardwareRate >= 88200 -> 88200
-            sourceRate == 44100 -> 44100
-            else -> 48000
-        }
     }
 }
 

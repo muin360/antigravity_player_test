@@ -75,7 +75,7 @@ class UniversalHardwareDetector(private val context: Context) {
                 it.type == AudioDeviceInfo.TYPE_USB_ACCESSORY 
             }
             if (usbDevice != null) {
-                val rates = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) usbDevice.sampleRates.toList() else listOf(44100, 48000, 96000, 192000, 384000)
+                val rates = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) usbDevice.sampleRates.toList().filter { it > 0 }.sorted() else emptyList()
                 return OutputDeviceSnapshot(
                     deviceType = "USB_DAC",
                     displayName = if (usbDevice.productName.isNotBlank()) usbDevice.productName.toString() else "External USB Audio DAC",
@@ -93,13 +93,14 @@ class UniversalHardwareDetector(private val context: Context) {
             }
             if (wiredDevice != null) {
                 val hasMic = wiredDevice.type == AudioDeviceInfo.TYPE_WIRED_HEADSET
+                val rates = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) wiredDevice.sampleRates.toList().filter { it > 0 }.sorted() else emptyList()
                 return OutputDeviceSnapshot(
                     deviceType = if (hasMic) "WIRED_HEADSET" else "WIRED_HEADPHONES",
                     displayName = if (hasMic) "3.5mm Wired Headset (With Mic)" else "3.5mm Wired Headphones (Stereo Line)",
                     isWired = true,
                     isBluetooth = false,
                     isUsb = false,
-                    supportedSampleRates = listOf(44100, 48000, 96000, 192000)
+                    supportedSampleRates = rates
                 )
             }
 
@@ -189,20 +190,20 @@ class UniversalHardwareDetector(private val context: Context) {
         if (manufacturer.contains("vivo") || brand.contains("vivo") || brand.contains("iqoo") || model.contains("x21")) {
             return if (model.contains("x21") || hardware.contains("sdm660") || board.contains("sdm660")) {
                 DacHardwareSnapshot(
-                    dacModelName = "Asahi Kasei AK4376A (Potential)",
-                    dacManufacturer = "AKM",
-                    dacArchitecture = "32-bit DAC with Headphone Amp",
-                    maxSampleRateHz = 384000,
-                    maxBitDepth = 32,
+                    dacModelName = "AKM Hardware DAC (Potential)",
+                    dacManufacturer = "Asahi Kasei (AKM)",
+                    dacArchitecture = "Discrete Hi-Fi Architecture",
+                    maxSampleRateHz = 0, // Unknown without direct probe
+                    maxBitDepth = 0,
                     confidence = Confidence.INFERRED
                 )
             } else {
                 DacHardwareSnapshot(
-                    dacModelName = "Vivo Hi-Fi Hardware (Potential)",
+                    dacModelName = "Vivo Hi-Fi Path (Potential)",
                     dacManufacturer = "Vivo Electronics",
                     dacArchitecture = "Discrete DAC Path",
-                    maxSampleRateHz = 192000,
-                    maxBitDepth = 24,
+                    maxSampleRateHz = 0,
+                    maxBitDepth = 0,
                     confidence = Confidence.INFERRED
                 )
             }
@@ -213,9 +214,9 @@ class UniversalHardwareDetector(private val context: Context) {
             return DacHardwareSnapshot(
                 dacModelName = "ESS Sabre Quad DAC (Potential)",
                 dacManufacturer = "ESS Technology, Inc.",
-                dacArchitecture = "32-bit Parallel HyperStream® II",
-                maxSampleRateHz = 384000,
-                maxBitDepth = 32,
+                dacArchitecture = "Parallel HyperStream® Architecture",
+                maxSampleRateHz = 0,
+                maxBitDepth = 0,
                 confidence = Confidence.INFERRED
             )
         }
@@ -223,11 +224,11 @@ class UniversalHardwareDetector(private val context: Context) {
         // 3. Samsung UHQ 32-bit Float Engine
         if (manufacturer.contains("samsung")) {
             return DacHardwareSnapshot(
-                dacModelName = "Samsung SoundAlive Engine (Software)",
+                dacModelName = "Samsung UHQ Engine (Potential)",
                 dacManufacturer = "Samsung Electronics",
-                dacArchitecture = "Ultra High Quality 32-bit Float",
-                maxSampleRateHz = 192000,
-                maxBitDepth = 32,
+                dacArchitecture = "High-Resolution Processing Path",
+                maxSampleRateHz = 0,
+                maxBitDepth = 0,
                 confidence = Confidence.INFERRED
             )
         }
@@ -235,11 +236,11 @@ class UniversalHardwareDetector(private val context: Context) {
         // 4. Sony Xperia Hi-Res Audio
         if (manufacturer.contains("sony")) {
             return DacHardwareSnapshot(
-                dacModelName = "Sony S-Master HX (Potential)",
+                dacModelName = "Sony Hi-Res Path (Potential)",
                 dacManufacturer = "Sony Corporation",
                 dacArchitecture = "High-Resolution Audio Architecture",
-                maxSampleRateHz = 192000,
-                maxBitDepth = 24,
+                maxSampleRateHz = 0,
+                maxBitDepth = 0,
                 confidence = Confidence.INFERRED
             )
         }
@@ -249,8 +250,8 @@ class UniversalHardwareDetector(private val context: Context) {
             dacModelName = "Standard Platform Codec",
             dacManufacturer = "Qualcomm / Generic HAL",
             dacArchitecture = "Integrated SoC Audio Path",
-            maxSampleRateHz = 48000,
-            maxBitDepth = 24,
+            maxSampleRateHz = 0,
+            maxBitDepth = 0,
             confidence = Confidence.UNKNOWN
         )
     }

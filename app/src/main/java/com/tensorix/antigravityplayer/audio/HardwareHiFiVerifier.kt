@@ -209,16 +209,19 @@ object HardwareHiFiVerifier {
         val isBitDepthPreserved = trackBitDepth <= 24
         val isEligible = isDspBypassed && isDirectSupported && isSampleRateMatched && isBitDepthPreserved
         
-        // Verified requires actual direct path active proof
+        // Verified requires actual direct path active proof from HAL parameters
         val isVerified = isEligible && isDirectActive
 
         if (!isDirectSupported) {
             limitations.add("Direct AudioTrack path is unsupported for this format")
         }
+        if (isDirectSupported && !isDirectActive) {
+            limitations.add("Direct path supported but not currently active in HAL")
+        }
         if (!isDspBypassed) {
             limitations.add("DSP Engine is modifying PCM samples")
         }
-        if (!isDirectSupported && trackSampleRate > 0 && trackSampleRate != systemSampleRate) {
+        if (!isDirectActive && trackSampleRate > 0 && trackSampleRate != systemSampleRate) {
             limitations.add("System resamples track ($trackSampleRate Hz ➔ $systemSampleRate Hz)")
         }
 

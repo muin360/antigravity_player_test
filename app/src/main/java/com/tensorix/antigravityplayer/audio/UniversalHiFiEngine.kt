@@ -13,8 +13,11 @@ enum class UniversalHiFiState(val code: String, val title: String, val badgeColo
     UNSUPPORTED("UNSUPPORTED", "Standard Audio Path", 0xFF666666, "Routing through standard platform audio mixer"),
     AVAILABLE("AVAILABLE", "Hi-Fi Available", 0xFF4CAF50, "Audiophile hardware detected; awaiting playback session"),
     ACTIVE("ACTIVE", "Hi-Fi Active", 0xFF00E676, "Dedicated hardware DAC line active on wired analog path"),
-    BIT_PERFECT("BIT_PERFECT", "Bit-Perfect Mode", 0xFF00E5FF, "Integer PCM bitstream with 0 DSP, 0 EQ, and 0 AudioEffects"),
-    USB_BIT_PERFECT("USB_BIT_PERFECT", "USB Master Bit-Perfect", 0xFFFFD700, "Bit-Exact direct hardware streaming to external USB Audio Class 2.0 DAC")
+    BIT_PERFECT_REQUESTED("BIT_PERFECT_REQUESTED", "Bit-Perfect Requested", 0xFF00B0FF, "Bit-perfect mode enabled; negotiating hardware path"),
+    BIT_PERFECT_ELIGIBLE("BIT_PERFECT_ELIGIBLE", "Bit-Perfect Eligible", 0xFF00E5FF, "Hardware path supports bit-perfect; awaiting verification"),
+    BIT_PERFECT_ACTIVE_UNVERIFIED("BIT_PERFECT_UNVERIFIED", "Direct Active (Unverified)", 0xFFD500F9, "Direct path active, but bit-integrity not yet verified"),
+    BIT_PERFECT_VERIFIED("BIT_PERFECT_VERIFIED", "Bit-Perfect Verified", 0xFFFFD700, "Verified strict Bit-for-Bit exact studio master output established"),
+    USB_BIT_PERFECT("USB_BIT_PERFECT", "USB Master Bit-Perfect", 0xFFFFD700, "Verified Bit-Exact direct hardware streaming to external USB DAC")
 }
 
 /**
@@ -60,23 +63,31 @@ class UniversalHiFiEngine(private val context: Context) {
         val state = when {
             // Case 1: Bit-Perfect VERIFIED (Strongest proof)
             canon?.bitPerfect?.state == BitPerfectState.VERIFIED -> {
-                if (device.isUsb) UniversalHiFiState.USB_BIT_PERFECT else UniversalHiFiState.BIT_PERFECT
+                if (device.isUsb) UniversalHiFiState.USB_BIT_PERFECT else UniversalHiFiState.BIT_PERFECT_VERIFIED
             }
             // Case 2: Bit-Perfect Active but unverified
             canon?.bitPerfect?.state == BitPerfectState.ACTIVE_UNVERIFIED -> {
-                UniversalHiFiState.BIT_PERFECT
+                UniversalHiFiState.BIT_PERFECT_ACTIVE_UNVERIFIED
             }
-            // Case 3: Hi-Fi Hardware Active (Direct Path)
+            // Case 3: Bit-Perfect Eligible
+            canon?.bitPerfect?.state == BitPerfectState.ELIGIBLE -> {
+                UniversalHiFiState.BIT_PERFECT_ELIGIBLE
+            }
+            // Case 4: Requested but not yet eligible/active
+            isBitPerfectRequested -> {
+                UniversalHiFiState.BIT_PERFECT_REQUESTED
+            }
+            // Case 5: Hi-Fi Hardware Active (Direct Path)
             canon?.directPathActive?.value == true && isPlaying -> {
                 UniversalHiFiState.ACTIVE
             }
-            // Case 4: Hardware available but idle or shared
+            // Case 6: Hardware available but idle or shared
             device.isWired || device.isUsb -> {
-                if (isPlaying) UniversalHiFiState.ACTIVE else UniversalHiFiState.AVAILABLE
+                UniversalHiFiState.AVAILABLE
             }
-            // Case 5: Bluetooth High-Res Audio
+            // Case 7: Bluetooth High-Res Audio
             device.isBluetooth && (device.bluetoothCodecName.contains("LDAC") || device.bluetoothCodecName.contains("aptX HD") || device.bluetoothCodecName.contains("LHDC")) -> {
-                if (isPlaying) UniversalHiFiState.ACTIVE else UniversalHiFiState.AVAILABLE
+                UniversalHiFiState.AVAILABLE
             }
             else -> {
                 UniversalHiFiState.UNSUPPORTED
@@ -106,7 +117,7 @@ class UniversalHiFiEngine(private val context: Context) {
             activeDac = dac,
             activeDevice = device,
             platformCapabilities = platform,
-            isBitPerfectActive = isBitPerfectRequested,
+            isBitPerfectActive = state == UniversalHiFiState.BIT_PERFECT_VERIFIED || state == UniversalHiFiState.USB_BIT_PERFECT || state == UniversalHiFiState.BIT_PERFECT_ACTIVE_UNVERIFIED,
             sampleRateHz = trackSampleRate,
             bitDepth = trackBitDepth,
             audioSessionId = audioSessionId,

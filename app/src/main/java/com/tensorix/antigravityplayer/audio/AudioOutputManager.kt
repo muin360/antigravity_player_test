@@ -15,6 +15,7 @@ import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Build
 import androidx.media3.common.util.UnstableApi
+import com.tensorix.antigravityplayer.player.PlaybackService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -224,28 +225,31 @@ class AudioOutputManager(private val context: Context) {
         val usbDacs = cachedUsbDacs
 
         // 1. Identify ACTUALLY ACTIVE route from system
-        val activeDevice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull { it.isSink }
-        } else null
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val activeDevices = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        } else emptyArray()
         
-        // Correlate with cached capabilities
+        // Find the device that is actually sink and currently active
+        // On many Android devices, multiple devices might be returned, but only one is "active"
+        // We use a heuristic: the first USB or Wired device, or Speaker.
+        val activeDevice = activeDevices.firstOrNull { it.isSink && it.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                          ?: activeDevices.firstOrNull { it.isSink && it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+
+        // Correlate with cached capabilities - MUST be precise
         val activeRoute = activeDevice?.let { dev ->
             val devName = dev.productName?.toString() ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) dev.address else null
             routes.find { it.deviceName == (devName ?: it.routeType.displayName) }
-        } ?: routes.firstOrNull { it.routeType == AudioOutputRouteType.USB_DAC || it.routeType == AudioOutputRouteType.USB_DEVICE }
-          ?: routes.firstOrNull { it.routeType == AudioOutputRouteType.WIRED_HEADPHONES || it.routeType == AudioOutputRouteType.WIRED_HEADSET }
-          ?: routes.firstOrNull()
+        }
 
         // 2. Build Canonical Runtime Snapshot
         val currentTrack = trackInfo ?: AudioTrackInfo()
-        val dsp = com.tensorix.antigravityplayer.player.PlaybackService.instance?.dspProcessor
         val canonicalSnapshot = AudioVerificationEngine.buildCanonicalSnapshot(
             context = context,
             trackInfo = currentTrack,
             isDspActive = isDspActive,
             activeRoute = activeRoute,
-            dvcVolume = dsp?.dvcVolume ?: 1.0,
-            ditherStrength = dsp?.ditherStrength ?: 0.0
+            dspProcessor = PlaybackService.instance?.dspProcessor
         )
 
         val sampleRate = canonicalSnapshot.actualOutput.sampleRate.value
@@ -254,17 +258,11 @@ class AudioOutputManager(private val context: Context) {
         
         // 3. Map Snapshot back to existing UI model for compatibility
         val bitPerfectState = canonicalSnapshot.bitPerfect.state
-        val bitPerfectPossible = canonicalSnapshot.directPathActive.value
+        val bitPerfectPossible = canonicalSnapshot.directPathActive.value && bitPerfectState != BitPerfectState.UNAVAILABLE
 
-        val routeName = activeRoute?.productName ?: activeRoute?.deviceName ?: "System Audio Output"
-        val playbackPath = if (canonicalSnapshot.directPathActive.value) {
-            if (isDspActive) "64-bit Audiophile DSP ➔ Direct Hardware HAL ➔ $routeName"
-            else "Direct Bit-Perfect Path ➔ $routeName"
-        } else {
-            "AudioFlinger System Mixer ($sampleRate Hz) ➔ $routeName"
-        }
+        val playbackPath = buildPlaybackPath(activeRoute, bitPerfectState)
         
-        val signalStages = buildSignalPathStages(currentTrack, isDspActive, activeRoute, bitPerfectState)
+        val signalStages = buildSignalPathStages(currentTrack, activeRoute, bitPerfectState, canonicalSnapshot)
 
         return AudioOutputState(
             activeRoute = activeRoute,
@@ -278,8 +276,8 @@ class AudioOutputManager(private val context: Context) {
             resamplingRequired = canonicalSnapshot.resamplerState.value == "ACTIVE",
             signalPathStages = signalStages,
             deviceLimitations = limitations,
-            latencyMs = 0, // Should be measured at runtime
-            runtimeSnapshot = null, // Old model removed
+            latencyMs = 0,
+            runtimeSnapshot = null,
             canonicalSnapshot = canonicalSnapshot
         )
     }
@@ -291,14 +289,13 @@ class AudioOutputManager(private val context: Context) {
     fun currentSnapshot(trackInfo: AudioTrackInfo? = null, isDspActive: Boolean = true): AudiophilePlaybackSnapshot {
         val outputState = scanOutputStateInternal(trackInfo, isDspActive)
         val info = trackInfo ?: AudioTrackInfo()
-        val isMixer = outputState.bitPerfectState == BitPerfectState.FAILED || outputState.bitPerfectState == BitPerfectState.UNAVAILABLE
         val quality = AudioQualityState.evaluate(
             sourceCodec = info.codec,
             sourceSampleRate = info.sampleRateHz,
             sourceBitDepth = info.bitDepth,
             actualOutputSampleRate = outputState.currentPlaybackSampleRate,
             actualOutputBitDepth = outputState.currentPlaybackBitDepth,
-            isAudioFlingerMixer = isMixer
+            bitPerfectState = outputState.bitPerfectState
         )
         return AudiophilePlaybackSnapshot(
             track = info.copy(quality = quality),
@@ -320,23 +317,25 @@ class AudioOutputManager(private val context: Context) {
 
     private fun buildSignalPathStages(
         trackInfo: AudioTrackInfo?,
-        isDspActive: Boolean,
         route: AudioRouteCapability?,
-        bitPerfectState: BitPerfectState
+        bitPerfectState: BitPerfectState,
+        snapshot: CanonicalAudioRuntimeSnapshot
     ): List<SignalPathStage> {
         val stages = mutableListOf<SignalPathStage>()
 
         // Stage 1: Source File
-        val codec = trackInfo?.codec ?: "Lossless FLAC"
-        val sampleRateStr = "${(trackInfo?.sampleRateHz ?: 96000) / 1000.0} kHz"
-        val bitDepthStr = "${trackInfo?.bitDepth ?: 24}-bit"
+        val codec = trackInfo?.codec ?: "Lossless PCM"
+        val sampleRateValue = trackInfo?.sampleRateHz ?: 0
+        val sampleRateStr = if (sampleRateValue > 0) "${sampleRateValue / 1000.0} kHz" else "Unknown kHz"
+        val bitDepthValue = trackInfo?.bitDepth ?: 0
+        val bitDepthStr = if (bitDepthValue > 0) "$bitDepthValue-bit" else "Unknown-bit"
         stages.add(
             SignalPathStage(
                 stageName = "1. Source Track",
                 title = "$codec ($bitDepthStr / $sampleRateStr)",
                 description = "Direct lossless decoding from storage container",
                 isBitPerfect = true,
-                badge = if ((trackInfo?.sampleRateHz ?: 0) >= 88200 || (trackInfo?.bitDepth ?: 0) >= 24) "HI-RES" else "HI-FI"
+                badge = if (sampleRateValue >= 88200 || bitDepthValue >= 24) "HI-RES" else "HI-FI"
             )
         )
 
@@ -352,14 +351,16 @@ class AudioOutputManager(private val context: Context) {
         )
 
         // Stage 3: DSP / Equalizer Engine
-        if (isDspActive) {
+        val dsp = PlaybackService.instance?.dspProcessor
+        val dspEnabled = dsp != null && dsp.isEnabled && !dsp.isBitPerfectBypass
+        if (dspEnabled) {
             stages.add(
                 SignalPathStage(
                     stageName = "3. DSP & Audio Effects",
-                    title = "Parametric Equalizer + BassBoost",
+                    title = "Parametric Equalizer + 64-bit DSP",
                     description = "AudioEffect chain active. Bitstream modified for acoustic shaping",
                     isBitPerfect = false,
-                    badge = "DSP ON"
+                    badge = "DSP ACTIVE"
                 )
             )
         } else {
@@ -369,35 +370,49 @@ class AudioOutputManager(private val context: Context) {
                     title = "Pure Bit-Perfect Direct Stream",
                     description = "DSP engine completely bypassed to preserve exact studio master bitstream",
                     isBitPerfect = true,
-                    badge = "BIT-PERFECT"
+                    badge = "BYPASSED"
                 )
             )
         }
 
         // Stage 4: AudioSink / AudioTrack Pipeline
-        val sinkRate = "${(trackInfo?.sampleRateHz ?: 96000) / 1000.0} kHz"
-        val isAux = route?.routeType == AudioOutputRouteType.WIRED_HEADPHONES || route?.routeType == AudioOutputRouteType.WIRED_HEADSET
+        val actualRate = snapshot.actualOutput.sampleRate.value
+        val actualRateStr = if (actualRate > 0) "${actualRate / 1000.0} kHz" else "UNKNOWN"
+        val sinkBadge = when (bitPerfectState) {
+            BitPerfectState.VERIFIED -> "VERIFIED"
+            BitPerfectState.ACTIVE_UNVERIFIED -> "ACTIVE"
+            BitPerfectState.UNKNOWN -> "UNKNOWN"
+            else -> "UNAVAILABLE"
+        }
+        
         stages.add(
             SignalPathStage(
                 stageName = "4. AudioSink Output",
-                title = "Float AudioSink ($sinkRate)",
-                description = if (isAux) "Wired AudioAux precision path with hardware buffer optimization" else "AudioTrack initialized with dynamic sample rate matching",
-                isBitPerfect = !isDspActive,
-                badge = if (isAux) "AUDIO AUX" else "MATCHED RATE"
+                title = "Float AudioSink ($actualRateStr)",
+                description = if (bitPerfectState == BitPerfectState.VERIFIED) "Verified direct native stream with exact sample-rate matching"
+                else "AudioTrack initialized; bit-perfect status unverified",
+                isBitPerfect = bitPerfectState == BitPerfectState.VERIFIED,
+                badge = sinkBadge
             )
         )
 
         // Stage 5: Hardware DAC / Endpoint
         val routeName = route?.productName ?: route?.deviceName ?: "Hardware Audio DAC"
-        val isHardwareBitPerfect = bitPerfectState == BitPerfectState.VERIFIED || bitPerfectState == BitPerfectState.ACTIVE_UNVERIFIED
+        val dacBadge = when (bitPerfectState) {
+            BitPerfectState.VERIFIED -> "VERIFIED"
+            BitPerfectState.ACTIVE_UNVERIFIED -> "ACTIVE"
+            BitPerfectState.UNKNOWN -> "UNKNOWN"
+            else -> route?.routeType?.displayName ?: "DAC"
+        }
         stages.add(
             SignalPathStage(
                 stageName = "5. Hardware DAC / Endpoint",
                 title = routeName,
-                description = if (isHardwareBitPerfect) "Direct DAC conversion with native clock synchronization"
+                description = if (bitPerfectState == BitPerfectState.VERIFIED) "Verified Bit-for-Bit exact studio master output established"
+                else if (bitPerfectState == BitPerfectState.ACTIVE_UNVERIFIED) "Direct path active; bit-integrity not yet verified"
                 else "Mixed and resampled through Android AudioFlinger audio HAL",
-                isBitPerfect = isHardwareBitPerfect,
-                badge = route?.routeType?.displayName ?: "DAC"
+                isBitPerfect = bitPerfectState == BitPerfectState.VERIFIED,
+                badge = dacBadge
             )
         )
 

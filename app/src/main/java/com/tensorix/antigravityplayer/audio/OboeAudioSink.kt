@@ -15,6 +15,7 @@ import androidx.media3.exoplayer.analytics.PlayerId
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.annotation.WorkerThread
+import com.tensorix.antigravityplayer.player.PlaybackService
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -202,8 +203,8 @@ class OboeAudioSink(
             }
         }
 
-        // Apply software volume if DVC is not handling it
-        if (volume != 1.0f) {
+        // Apply software volume if DVC is not handling it and not in bit-perfect mode
+        if (volume != 1.0f && !bitPerfectMode) {
             for (i in 0 until sampleCount) {
                 floatBuffer[i] *= volume
             }
@@ -218,14 +219,32 @@ class OboeAudioSink(
 
             buffer.position((initialPosition + bytesConsumed).coerceAtMost(buffer.limit()))
             if (framesWrittenResult < numFrames) {
-                Log.w(TAG_LOG, "Oboe write partial: $framesWrittenResult / $numFrames frames")
+                // Partial write, return true to let ExoPlayer know some was consumed
+                // ExoPlayer will call handleBuffer again with the remaining buffer
+                return true
             }
             return true
         }
 
-        Log.e(TAG_LOG, "Oboe write failed, consuming buffer to avoid stalling ExoPlayer")
-        buffer.position(buffer.limit())
-        return true
+        // P0 Blocker 6: Controlled Error Handling
+        val errorCode = framesWrittenResult
+        Log.e(TAG_LOG, "Oboe write failed with error code: $errorCode. Initiating recovery.")
+        
+        // Mark stream as invalid
+        closeOboeStream()
+        
+        // Determine if recoverable. 
+        // In Oboe/AAudio, most write errors are non-recoverable without stream recreation.
+        // We return false here to signal to ExoPlayer that the buffer was NOT consumed.
+        // ExoPlayer will retry, and our streamHandle being 0 will trigger openOboeStream().
+        
+        // Update BitPerfect state in global snapshot if possible (via service)
+        PlaybackService.instance?.let { service ->
+            // Trigger a re-evaluation of the bit-perfect state
+            service.audioOutputManager?.forceRefresh()
+        }
+
+        return false
     }
 
     override fun playToEndOfStream() {
@@ -364,7 +383,7 @@ class OboeAudioSink(
             OboeBridge.setAirPresenceGainDb(handle, dsp.airPresenceGainDb)
 
             // Sync 10-band Graphic EQ & HRTF Spatial Audio from EqualizerEngine
-            com.tensorix.antigravityplayer.player.PlaybackService.instance?.equalizerEngine?.let { eq ->
+            PlaybackService.instance?.equalizerEngine?.let { eq ->
                 eq.bandLevels.value.forEachIndexed { index, level ->
                     OboeBridge.setBandGain(handle, index, level.toDouble() / 100.0)
                 }
@@ -373,7 +392,7 @@ class OboeAudioSink(
             }
 
             // Sync Active AutoEQ PEQ Bands if enabled
-            com.tensorix.antigravityplayer.player.PlaybackService.instance?.autoEqEngine?.let { autoEq ->
+            PlaybackService.instance?.autoEqEngine?.let { autoEq ->
                 if (autoEq.isAutoEqEnabled.value) {
                     autoEq.activeProfile.value?.let { profile ->
                         OboeBridge.clearPeqBands(handle)
