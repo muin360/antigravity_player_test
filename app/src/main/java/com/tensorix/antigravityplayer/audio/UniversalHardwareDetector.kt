@@ -149,18 +149,17 @@ class UniversalHardwareDetector(private val context: Context) {
      * Detects Bluetooth Audio Codec via AudioManager parameters.
      */
     private fun detectBluetoothCodec(): String {
-        val am = audioManager ?: return "SBC (Default)"
-        val a2dpCodecParam = am.getParameters("A2dpSuspended") ?: ""
+        val am = audioManager ?: return "SBC"
         val codecConfig = am.getParameters("bluetooth_a2dp_codec") ?: ""
         
         return when {
-            codecConfig.contains("ldac", ignoreCase = true) -> "LDAC (990kbps 24-bit/96kHz)"
-            codecConfig.contains("aptx_hd", ignoreCase = true) -> "aptX HD (576kbps 24-bit/48kHz)"
-            codecConfig.contains("aptx_adaptive", ignoreCase = true) -> "aptX Adaptive (Low-Latency 24-bit/96kHz)"
-            codecConfig.contains("aptx", ignoreCase = true) -> "aptX (352kbps 16-bit/44.1kHz)"
-            codecConfig.contains("lhdc", ignoreCase = true) -> "LHDC (900kbps 24-bit/96kHz)"
-            codecConfig.contains("aac", ignoreCase = true) -> "AAC (256kbps 16-bit/44.1kHz)"
-            else -> "SBC (328kbps Standard)"
+            codecConfig.contains("ldac", ignoreCase = true) -> "LDAC"
+            codecConfig.contains("aptx_hd", ignoreCase = true) -> "aptX HD"
+            codecConfig.contains("aptx_adaptive", ignoreCase = true) -> "aptX Adaptive"
+            codecConfig.contains("aptx", ignoreCase = true) -> "aptX"
+            codecConfig.contains("lhdc", ignoreCase = true) -> "LHDC"
+            codecConfig.contains("aac", ignoreCase = true) -> "AAC"
+            else -> "SBC"
         }
     }
 
@@ -172,10 +171,10 @@ class UniversalHardwareDetector(private val context: Context) {
         if (outputDevice.isUsb) {
             return DacHardwareSnapshot(
                 dacModelName = "External USB Audio DAC",
-                dacManufacturer = "USB Audio Class 2.0",
-                dacArchitecture = "Asynchronous Direct Path",
+                dacManufacturer = "USB Audio Device",
+                dacArchitecture = "Direct USB Endpoint",
                 maxSampleRateHz = outputDevice.supportedSampleRates.maxOrNull() ?: 0,
-                maxBitDepth = 32, // Typical for UAC2
+                maxBitDepth = 0,
                 confidence = Confidence.HIGH_CONFIDENCE
             )
         }
@@ -193,7 +192,7 @@ class UniversalHardwareDetector(private val context: Context) {
                     dacModelName = "AKM Hardware DAC (Potential)",
                     dacManufacturer = "Asahi Kasei (AKM)",
                     dacArchitecture = "Discrete Hi-Fi Architecture",
-                    maxSampleRateHz = 0, // Unknown without direct probe
+                    maxSampleRateHz = 0,
                     maxBitDepth = 0,
                     confidence = Confidence.INFERRED
                 )
@@ -263,13 +262,14 @@ class UniversalHardwareDetector(private val context: Context) {
         val am = audioManager
         val nativeSampleRate = am?.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toIntOrNull() ?: 48000
         val nativeBufferSize = am?.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)?.toIntOrNull() ?: 960
+        val probe = HardwareHiFiVerifier.probeHardwareState(context)
 
         return PlatformCapabilitiesSnapshot(
             isFloatOutputSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP,
-            isDirectPlaybackSupported = outputDevice.isUsb,
+            isDirectPlaybackSupported = probe.isDirectOutputSupported,
             isOffloadSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q,
             isAAudioAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O,
-            isHighResolutionPcmSupported = true,
+            isHighResolutionPcmSupported = nativeSampleRate >= 88200 || outputDevice.isUsb,
             platformSampleRate = nativeSampleRate,
             platformBufferSize = nativeBufferSize
         )

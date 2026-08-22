@@ -204,13 +204,13 @@ object HardwareHiFiVerifier {
             AudioFlingerThreadType.UNKNOWN -> "Standard AudioTrack"
         }
 
-        // 6. Strict Bit-Perfect Verification
+        // 6. HAL-Level Direct Stream Eligibility Indicator
         val isSampleRateMatched = (trackSampleRate > 0 && trackSampleRate == systemSampleRate) || (isDirectSupported && trackSampleRate > 0)
-        val isBitDepthPreserved = trackBitDepth <= 24
+        val isBitDepthPreserved = trackBitDepth in 1..32
         val isEligible = isDspBypassed && isDirectSupported && isSampleRateMatched && isBitDepthPreserved
         
-        // Verified requires actual direct path active proof from HAL parameters
-        val isVerified = isEligible && isDirectActive
+        // Canonical Bit-Perfect verification is authoritatively evaluated by BitPerfectVerifier
+        val isVerified = false
 
         if (!isDirectSupported) {
             limitations.add("Direct AudioTrack path is unsupported for this format")

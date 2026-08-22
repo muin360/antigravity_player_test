@@ -78,7 +78,7 @@ object VivoHiFiStateEngine {
 
         val hiFiState = when {
             isUsbDac -> {
-                HiFiHardwareState.ACTIVE_WITH_EXTERNAL_DAC
+                if (isPlaying && audioSessionId != 0) HiFiHardwareState.ACTIVE_WITH_EXTERNAL_DAC else HiFiHardwareState.AVAILABLE
             }
             !isVivo -> {
                 limitations.add("Device is not a Vivo Hi-Fi enabled hardware model")
@@ -125,6 +125,8 @@ object VivoHiFiStateEngine {
             appendLine("=======================================================")
         }
 
+        val directProbe = HardwareHiFiVerifier.probeHardwareState(context)
+
         return HardwareCapabilityReport(
             dacModelName = dacName,
             outputDevice = outputDevice,
@@ -132,11 +134,11 @@ object VivoHiFiStateEngine {
             isUsbDacConnected = isUsbDac,
             audioSessionId = audioSessionId,
             audioTrackEncoding = if (isFloatOutput) "ENCODING_PCM_FLOAT" else "ENCODING_PCM_16BIT",
-            audioFlingerRoute = if (isUsbDac) "usb_device output (DIRECT)" else "AudioOut_D (MIXER_THREAD)",
-            isDirectPlaybackSupported = isUsbDac,
+            audioFlingerRoute = if (isUsbDac) "usb_device output" else "AudioOut_D (MIXER_THREAD)",
+            isDirectPlaybackSupported = directProbe.isDirectOutputSupported,
             isOffloadSupported = false,
             isFloatOutputSupported = true,
-            isBitPerfectEligible = isUsbDac || (isWiredHeadset && isDspBypassed),
+            isBitPerfectEligible = (isUsbDac || isWiredHeadset) && isDspBypassed,
             hiFiHardwareState = hiFiState,
             vivoHifiSettingState = true,
             limitations = limitations,

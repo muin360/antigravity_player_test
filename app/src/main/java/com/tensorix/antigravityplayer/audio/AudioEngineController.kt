@@ -22,6 +22,15 @@ object AudioEngineController {
         _snapshot.value = state?.canonicalSnapshot
     }
 
+    fun setSnapshot(snapshot: CanonicalAudioRuntimeSnapshot?) {
+        _snapshot.value = snapshot
+    }
+
+    fun invalidate() {
+        _snapshot.value = null
+        HardwareHiFiVerifier.invalidateCache()
+    }
+
     fun getBitPerfectState(): BitPerfectState {
         return _snapshot.value?.bitPerfect?.state ?: BitPerfectState.UNKNOWN
     }

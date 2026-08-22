@@ -33,6 +33,22 @@ enum class BitPerfectState(val label: String) {
     UNKNOWN("Unknown State")
 }
 
+enum class DirectPathState(val displayName: String) {
+    DIRECT_CAPABILITY("Direct Output Capable"),
+    DIRECT_REQUESTED("Direct Output Requested"),
+    DIRECT_NEGOTIATING("Direct Output Negotiating"),
+    DIRECT_ACTIVE("Direct Output Active"),
+    DIRECT_FAILED("Direct Output Failed"),
+    DIRECT_UNKNOWN("Direct Output State Unknown")
+}
+
+enum class MixerPathState(val displayName: String) {
+    MIXER_ACTIVE("AudioFlinger Mixer Active"),
+    DIRECT_ACTIVE("Direct HAL Path Active (Mixer Bypassed)"),
+    OFFLOAD_ACTIVE("Hardware Offload Active"),
+    UNKNOWN("Mixer State Unknown")
+}
+
 enum class EvidenceSource {
     SOURCE_METADATA,
     ANDROID_AUDIO_DEVICE,
@@ -65,6 +81,36 @@ data class AudioFormatSnapshot(
     val bitDepth: AudioEvidence<Int>,
     val channels: AudioEvidence<Int>,
     val encoding: AudioEvidence<String>
+)
+
+data class NativeStreamSnapshot(
+    val handle: Long = 0L,
+    val state: String = "UNKNOWN", // Started, Paused, Stopped, Open, Closed, Unknown
+    val isStarted: Boolean = false,
+    val sampleRate: Int = 0,
+    val channelCount: Int = 0,
+    val nativeFormat: String = "UNKNOWN", // Float, I16, I24, I32
+    val sharingMode: String = "UNKNOWN", // EXCLUSIVE / SHARED
+    val performanceMode: String = "UNKNOWN", // LOW_LATENCY, NONE, POWER_SAVING
+    val audioApi: String = "UNKNOWN", // AAudio, OpenSLES
+    val deviceId: Int = 0,
+    val framesWritten: Long = 0L,
+    val underrunCount: Int = 0,
+    val bufferSizeInFrames: Int = 0,
+    val confidence: Confidence = Confidence.UNKNOWN
+)
+
+data class SignalProcessingPipelineSnapshot(
+    val sourcePcm: AudioFormatSnapshot,
+    val decoderConversion: String = "32-bit Float",
+    val dspConversion: String = "64-bit Double",
+    val isDspBypassed: Boolean = false,
+    val resamplerState: String = "OFF", // OFF / ACTIVE / BYPASS
+    val channelRemapActive: Boolean = false,
+    val softwareGainActive: Boolean = false,
+    val ditherActive: Boolean = false,
+    val outputConversion: String = "Integer PCM / Float",
+    val dacEndpoint: String = "Hardware Endpoint"
 )
 
 data class AudioRuntimeSnapshot(
@@ -166,13 +212,28 @@ data class CanonicalAudioRuntimeSnapshot(
     val performanceMode: AudioEvidence<String>,
 
     val directPathActive: AudioEvidence<Boolean>,
+    val directPathState: AudioEvidence<DirectPathState> = AudioEvidence(
+        if (directPathActive.value) DirectPathState.DIRECT_ACTIVE else DirectPathState.DIRECT_UNKNOWN,
+        directPathActive.source,
+        directPathActive.confidence,
+        directPathActive.timestamp
+    ),
     val mixerPathActive: AudioEvidence<Boolean>,
+    val mixerPathState: AudioEvidence<MixerPathState> = AudioEvidence(
+        if (!directPathActive.value && mixerPathActive.value) MixerPathState.MIXER_ACTIVE else if (directPathActive.value) MixerPathState.DIRECT_ACTIVE else MixerPathState.UNKNOWN,
+        mixerPathActive.source,
+        mixerPathActive.confidence,
+        mixerPathActive.timestamp
+    ),
     val resamplerState: AudioEvidence<String>, // OFF / ACTIVE / BYPASS
     val dspState: AudioEvidence<String>, // OFF / ACTIVE / BYPASS
 
     val dac: DacRuntimeState,
 
     val bitPerfect: BitPerfectRuntimeState,
+
+    val nativeStream: NativeStreamSnapshot? = null,
+    val pipeline: SignalProcessingPipelineSnapshot? = null,
 
     val confidence: Confidence,
     val limitations: List<String>
@@ -192,7 +253,11 @@ data class BitPerfectRuntimeState(
     val eligibility: Boolean,
     val verificationResult: BitPerfectVerificationResult? = null,
     val confidence: Confidence
-)
+) {
+    val evidence: String
+        get() = verificationResult?.evidence?.filter { it.isSatisfied }?.joinToString("; ") { it.description }
+            ?: if (state == BitPerfectState.VERIFIED) "All bit-perfect requirements verified" else "Awaiting verification"
+}
 
 data class AudioOutputState(
     val activeRoute: AudioRouteCapability? = null,
@@ -277,7 +342,7 @@ data class AudiophilePlaybackSnapshot(
 internal fun AudioDeviceInfo.toRouteType(): AudioOutputRouteType = when (type) {
     AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> AudioOutputRouteType.WIRED_HEADPHONES
     AudioDeviceInfo.TYPE_WIRED_HEADSET -> AudioOutputRouteType.WIRED_HEADSET
-    AudioDeviceInfo.TYPE_AUX_LINE -> AudioOutputRouteType.WIRED_HEADPHONES // Treat AUX as wired headphones
+    AudioDeviceInfo.TYPE_AUX_LINE -> AudioOutputRouteType.WIRED_HEADPHONES
     AudioDeviceInfo.TYPE_USB_DEVICE -> AudioOutputRouteType.USB_DEVICE
     AudioDeviceInfo.TYPE_USB_HEADSET -> AudioOutputRouteType.USB_DAC
     AudioDeviceInfo.TYPE_USB_ACCESSORY -> AudioOutputRouteType.USB_DEVICE

@@ -50,8 +50,12 @@ object HiFiStateManager {
             .getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)
             ?.toIntOrNull() ?: 48000
         
-        // HiFi is only valid on wired or USB DAC paths
-        val isHiFi = outputType == OutputType.WIRED || outputType == OutputType.USB_DAC
+        val probe = HardwareHiFiVerifier.probeHardwareState(context)
+        val canon = AudioEngineController.snapshot.value
+        
+        // HiFi is active only when dedicated hardware direct path or OEM DAC is actually active
+        val isHiFi = (outputType == OutputType.WIRED || outputType == OutputType.USB_DAC) &&
+                     (probe.isDirectOutputActive || probe.isVendorHiFiActive || canon?.directPathActive?.value == true)
         
         _state.value = HiFiState(
             isHiFiActive = isHiFi,

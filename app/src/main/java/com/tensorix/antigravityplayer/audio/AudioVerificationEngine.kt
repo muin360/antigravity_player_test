@@ -15,65 +15,80 @@ object AudioVerificationEngine {
         activeRoute: AudioRouteCapability?,
         dspProcessor: Audiophile64BitDspProcessor? = null
     ): CanonicalAudioRuntimeSnapshot {
-        val hardwareReport = HardwareHiFiVerifier.probeHardwareState(context, trackInfo.sampleRateHz, trackInfo.bitDepth, !isDspActive)
+        val isBitPerfectRequested = !isDspActive && (dspProcessor?.isBitPerfectBypass == true)
+        val hardwareReport = HardwareHiFiVerifier.probeHardwareState(context, trackInfo.sampleRateHz, trackInfo.bitDepth, isBitPerfectRequested)
         val nativeInfo = OboeAudioSink.currentStreamInfo
-        
+
         // 1. Source Format
         val source = AudioFormatSnapshot(
-            sampleRate = AudioEvidence(trackInfo.sampleRateHz, EvidenceSource.SOURCE_METADATA, Confidence.VERIFIED),
-            bitDepth = AudioEvidence(trackInfo.bitDepth, EvidenceSource.SOURCE_METADATA, Confidence.VERIFIED),
-            channels = AudioEvidence(trackInfo.channels, EvidenceSource.SOURCE_METADATA, Confidence.VERIFIED),
-            encoding = AudioEvidence(trackInfo.codec, EvidenceSource.SOURCE_METADATA, Confidence.VERIFIED)
+            sampleRate = AudioEvidence(
+                trackInfo.sampleRateHz.takeIf { it > 0 } ?: 0,
+                EvidenceSource.SOURCE_METADATA,
+                if (trackInfo.sampleRateHz > 0) Confidence.VERIFIED else Confidence.UNKNOWN
+            ),
+            bitDepth = AudioEvidence(
+                trackInfo.bitDepth.takeIf { it > 0 } ?: 0,
+                EvidenceSource.SOURCE_METADATA,
+                if (trackInfo.bitDepth > 0) Confidence.VERIFIED else Confidence.UNKNOWN
+            ),
+            channels = AudioEvidence(
+                trackInfo.channels.takeIf { it > 0 } ?: 0,
+                EvidenceSource.SOURCE_METADATA,
+                if (trackInfo.channels > 0) Confidence.VERIFIED else Confidence.UNKNOWN
+            ),
+            encoding = AudioEvidence(
+                trackInfo.codec,
+                EvidenceSource.SOURCE_METADATA,
+                if (trackInfo.codec.isNotBlank() && !trackInfo.codec.contains("Unknown")) Confidence.VERIFIED else Confidence.INFERRED
+            )
         )
 
         // 2. Decoder Format
         val decoder = AudioFormatSnapshot(
-            sampleRate = AudioEvidence(trackInfo.sampleRateHz, EvidenceSource.AUDIO_TRACK, Confidence.HIGH_CONFIDENCE),
-            bitDepth = AudioEvidence(32, EvidenceSource.AUDIO_TRACK, Confidence.HIGH_CONFIDENCE), // Media3 float decoding
-            channels = AudioEvidence(trackInfo.channels, EvidenceSource.AUDIO_TRACK, Confidence.HIGH_CONFIDENCE),
+            sampleRate = AudioEvidence(source.sampleRate.value, EvidenceSource.AUDIO_TRACK, source.sampleRate.confidence),
+            bitDepth = AudioEvidence(32, EvidenceSource.AUDIO_TRACK, Confidence.HIGH_CONFIDENCE),
+            channels = AudioEvidence(source.channels.value, EvidenceSource.AUDIO_TRACK, source.channels.confidence),
             encoding = AudioEvidence("PCM_FLOAT", EvidenceSource.AUDIO_TRACK, Confidence.HIGH_CONFIDENCE)
         )
 
         // 3. Processing Format
         val processing = AudioFormatSnapshot(
-            sampleRate = AudioEvidence(trackInfo.sampleRateHz, EvidenceSource.OBOE_STREAM, Confidence.INFERRED),
-            bitDepth = AudioEvidence(64, EvidenceSource.OBOE_STREAM, Confidence.VERIFIED), // Our engine uses Float64
-            channels = AudioEvidence(trackInfo.channels, EvidenceSource.OBOE_STREAM, Confidence.INFERRED),
+            sampleRate = AudioEvidence(source.sampleRate.value, EvidenceSource.OBOE_STREAM, source.sampleRate.confidence),
+            bitDepth = AudioEvidence(64, EvidenceSource.OBOE_STREAM, Confidence.VERIFIED),
+            channels = AudioEvidence(source.channels.value, EvidenceSource.OBOE_STREAM, source.channels.confidence),
             encoding = AudioEvidence("FLOAT64", EvidenceSource.OBOE_STREAM, Confidence.VERIFIED)
         )
 
-        // 4. Requested Output
+        // 4. Requested Output Format
         val requested = AudioFormatSnapshot(
-            sampleRate = AudioEvidence(trackInfo.sampleRateHz, EvidenceSource.AUDIO_TRACK, Confidence.VERIFIED),
-            bitDepth = AudioEvidence(trackInfo.bitDepth, EvidenceSource.AUDIO_TRACK, Confidence.VERIFIED),
-            channels = AudioEvidence(2, EvidenceSource.AUDIO_TRACK, Confidence.VERIFIED),
+            sampleRate = AudioEvidence(source.sampleRate.value, EvidenceSource.AUDIO_TRACK, source.sampleRate.confidence),
+            bitDepth = AudioEvidence(source.bitDepth.value, EvidenceSource.AUDIO_TRACK, source.bitDepth.confidence),
+            channels = AudioEvidence(source.channels.value, EvidenceSource.AUDIO_TRACK, source.channels.confidence),
             encoding = AudioEvidence("PCM", EvidenceSource.AUDIO_TRACK, Confidence.VERIFIED)
         )
 
-        // 5. Actual Output (P0 Blocker 3: Remove Fake Defaults)
+        // 5. Actual Output Telemetry
         val actual = if (nativeInfo != null) {
+            val bitDepth = when {
+                nativeInfo.format.contains("24") -> 24
+                nativeInfo.format.contains("Float", ignoreCase = true) || nativeInfo.format.contains("32") -> 32
+                nativeInfo.format.contains("16") -> 16
+                else -> 0
+            }
             AudioFormatSnapshot(
                 sampleRate = AudioEvidence(nativeInfo.sampleRate, EvidenceSource.OBOE_STREAM, Confidence.VERIFIED),
-                bitDepth = AudioEvidence(
-                    if (nativeInfo.format.contains("24")) 24 
-                    else if (nativeInfo.format.contains("Float")) 32 
-                    else if (nativeInfo.format.contains("16")) 16
-                    else 0, 
-                    EvidenceSource.OBOE_STREAM, 
-                    if (nativeInfo.format.isNotEmpty()) Confidence.HIGH_CONFIDENCE else Confidence.UNKNOWN
-                ),
+                bitDepth = AudioEvidence(bitDepth, EvidenceSource.OBOE_STREAM, if (bitDepth > 0) Confidence.VERIFIED else Confidence.UNKNOWN),
                 channels = AudioEvidence(nativeInfo.channelCount, EvidenceSource.OBOE_STREAM, Confidence.VERIFIED),
                 encoding = AudioEvidence(nativeInfo.format, EvidenceSource.OBOE_STREAM, Confidence.VERIFIED)
             )
         } else if (hardwareReport.isDirectOutputActive) {
             AudioFormatSnapshot(
                 sampleRate = AudioEvidence(hardwareReport.actualOutputSampleRate, EvidenceSource.HAL_PARAMETER, Confidence.HIGH_CONFIDENCE),
-                bitDepth = AudioEvidence(0, EvidenceSource.UNKNOWN, Confidence.UNKNOWN),
-                channels = AudioEvidence(0, EvidenceSource.UNKNOWN, Confidence.UNKNOWN),
+                bitDepth = AudioEvidence(source.bitDepth.value, EvidenceSource.AUDIO_TRACK, Confidence.INFERRED),
+                channels = AudioEvidence(2, EvidenceSource.AUDIO_TRACK, Confidence.INFERRED),
                 encoding = AudioEvidence(hardwareReport.actualAudioSinkType, EvidenceSource.HAL_PARAMETER, Confidence.HIGH_CONFIDENCE)
             )
         } else {
-            // Standard Mixer Path - values are NOT known for sure unless probed
             AudioFormatSnapshot(
                 sampleRate = AudioEvidence(hardwareReport.actualOutputSampleRate, EvidenceSource.HAL_PARAMETER, Confidence.HIGH_CONFIDENCE),
                 bitDepth = AudioEvidence(0, EvidenceSource.UNKNOWN, Confidence.UNKNOWN),
@@ -82,38 +97,99 @@ object AudioVerificationEngine {
             )
         }
 
-        // 6. Path & Route
-        val routeEvidence = AudioEvidence(
-            activeRoute?.routeType ?: AudioOutputRouteType.SPEAKER,
-            EvidenceSource.ANDROID_AUDIO_DEVICE,
-            if (activeRoute != null) Confidence.VERIFIED else Confidence.INFERRED
-        )
+        // 6. Active Route Evidence
+        val routeEvidence = if (activeRoute != null) {
+            AudioEvidence(activeRoute.routeType, EvidenceSource.ANDROID_AUDIO_DEVICE, Confidence.VERIFIED)
+        } else {
+            AudioEvidence(AudioOutputRouteType.OTHER, EvidenceSource.UNKNOWN, Confidence.UNKNOWN)
+        }
 
         val apiEvidence = AudioEvidence(
             if (nativeInfo != null) AudioOutputApi.AAUDIO else AudioOutputApi.AUDIOTRACK,
             if (nativeInfo != null) EvidenceSource.OBOE_STREAM else EvidenceSource.AUDIO_TRACK,
-            Confidence.VERIFIED
+            if (nativeInfo != null) Confidence.VERIFIED else Confidence.HIGH_CONFIDENCE
         )
 
-        val directActive = nativeInfo?.sharingMode == "EXCLUSIVE" || hardwareReport.isDirectOutputActive
-        val resamplerActive = trackInfo.sampleRateHz != actual.sampleRate.value
-        
-        // 7. DAC State (Blocker 4: Remove hardcoded DAC specs)
+        // 7. Direct & Mixer Path State
+        val isDirectActive = when {
+            nativeInfo != null -> nativeInfo.sharingMode == "EXCLUSIVE"
+            hardwareReport.isDirectOutputActive -> true
+            else -> false
+        }
+        val directConfidence = when {
+            nativeInfo != null -> Confidence.VERIFIED
+            hardwareReport.isDirectOutputActive -> Confidence.HIGH_CONFIDENCE
+            else -> Confidence.INFERRED
+        }
+        val directPathState = when {
+            isDirectActive -> DirectPathState.DIRECT_ACTIVE
+            hardwareReport.isDirectOutputSupported -> DirectPathState.DIRECT_CAPABILITY
+            else -> DirectPathState.DIRECT_UNKNOWN
+        }
+
+        val isMixerActive = !isDirectActive
+        val mixerPathState = when {
+            isDirectActive -> MixerPathState.DIRECT_ACTIVE
+            hardwareReport.isVendorHiFiActive -> MixerPathState.OFFLOAD_ACTIVE
+            else -> MixerPathState.MIXER_ACTIVE
+        }
+
+        val resamplerActive = source.sampleRate.value > 0 && actual.sampleRate.value > 0 && source.sampleRate.value != actual.sampleRate.value
+        val resamplerStateValue = when {
+            resamplerActive -> "ACTIVE"
+            nativeInfo != null && nativeInfo.sampleRate == source.sampleRate.value -> "OFF"
+            isDirectActive -> "OFF"
+            else -> "BYPASS"
+        }
+
+        // 8. DAC State
         val detector = UniversalHardwareDetector(context)
         val dacDevice = detector.detectActiveOutputDevice()
         val dacProfile = detector.detectDacHardware(dacDevice)
-        
+
         val dacState = DacRuntimeState(
             modelName = AudioEvidence(dacProfile.dacModelName, EvidenceSource.HEURISTIC, dacProfile.confidence),
             vendor = AudioEvidence(dacProfile.dacManufacturer, EvidenceSource.HEURISTIC, dacProfile.confidence),
-            isActive = AudioEvidence(hardwareReport.isVendorHiFiActive, EvidenceSource.HAL_PARAMETER, Confidence.HIGH_CONFIDENCE),
+            isActive = AudioEvidence(hardwareReport.isVendorHiFiActive || isDirectActive, EvidenceSource.HAL_PARAMETER, if (isDirectActive) Confidence.VERIFIED else Confidence.HIGH_CONFIDENCE),
             maxSampleRate = AudioEvidence(dacProfile.maxSampleRateHz, EvidenceSource.HEURISTIC, dacProfile.confidence),
             maxBitDepth = AudioEvidence(dacProfile.maxBitDepth, EvidenceSource.HEURISTIC, dacProfile.confidence),
             confidence = dacProfile.confidence
         )
 
-        // 8. Bit-Perfect State Machine (P0 Blocker 1 Rewrite)
-        val snapshot = CanonicalAudioRuntimeSnapshot(
+        val nativeStreamSnapshot = nativeInfo?.let {
+            NativeStreamSnapshot(
+                handle = OboeAudioSink.currentActiveHandle,
+                state = it.state,
+                isStarted = it.isStarted,
+                sampleRate = it.sampleRate,
+                channelCount = it.channelCount,
+                nativeFormat = it.format,
+                sharingMode = it.sharingMode,
+                performanceMode = it.performanceMode,
+                audioApi = it.api,
+                deviceId = it.deviceId,
+                framesWritten = it.framesWritten,
+                underrunCount = it.underrunCount,
+                bufferSizeInFrames = it.bufferSize,
+                confidence = Confidence.VERIFIED
+            )
+        }
+
+        val pipelineSnapshot = SignalProcessingPipelineSnapshot(
+            sourcePcm = source,
+            decoderConversion = "32-bit Float",
+            dspConversion = "64-bit Double",
+            isDspBypassed = !isDspActive,
+            resamplerState = resamplerStateValue,
+            channelRemapActive = false,
+            softwareGainActive = dspProcessor != null && dspProcessor.dvcVolume < 0.999 && !isDspActive,
+            ditherActive = dspProcessor != null && dspProcessor.ditherStrength > 0.001 && isDspActive,
+            outputConversion = actual.encoding.value,
+            dacEndpoint = dacState.modelName.value
+        )
+
+        // 9. Construct Canonical Snapshot
+        val preliminarySnapshot = CanonicalAudioRuntimeSnapshot(
             source = source,
             decoder = decoder,
             processing = processing,
@@ -121,25 +197,52 @@ object AudioVerificationEngine {
             actualOutput = actual,
             activeRoute = routeEvidence,
             audioApi = apiEvidence,
-            sharingMode = AudioEvidence(nativeInfo?.sharingMode ?: "SHARED", if (nativeInfo != null) EvidenceSource.OBOE_STREAM else EvidenceSource.AUDIO_TRACK, Confidence.VERIFIED),
-            performanceMode = AudioEvidence(nativeInfo?.performanceMode ?: "LOW_LATENCY", if (nativeInfo != null) EvidenceSource.OBOE_STREAM else EvidenceSource.HAL_PARAMETER, Confidence.HIGH_CONFIDENCE),
-            directPathActive = AudioEvidence(directActive, if (nativeInfo != null) EvidenceSource.OBOE_STREAM else EvidenceSource.HAL_PARAMETER, Confidence.HIGH_CONFIDENCE),
-            mixerPathActive = AudioEvidence(!directActive, EvidenceSource.HEURISTIC, Confidence.INFERRED),
-            resamplerState = AudioEvidence(if (resamplerActive) "ACTIVE" else "OFF", EvidenceSource.HAL_PARAMETER, Confidence.HIGH_CONFIDENCE),
+            sharingMode = AudioEvidence(
+                nativeInfo?.sharingMode ?: if (isDirectActive) "EXCLUSIVE" else "SHARED",
+                if (nativeInfo != null) EvidenceSource.OBOE_STREAM else EvidenceSource.AUDIO_TRACK,
+                if (nativeInfo != null) Confidence.VERIFIED else Confidence.HIGH_CONFIDENCE
+            ),
+            performanceMode = AudioEvidence(
+                nativeInfo?.performanceMode ?: "LOW_LATENCY",
+                if (nativeInfo != null) EvidenceSource.OBOE_STREAM else EvidenceSource.HAL_PARAMETER,
+                if (nativeInfo != null) Confidence.VERIFIED else Confidence.HIGH_CONFIDENCE
+            ),
+            directPathActive = AudioEvidence(isDirectActive, if (nativeInfo != null) EvidenceSource.OBOE_STREAM else EvidenceSource.HAL_PARAMETER, directConfidence),
+            directPathState = AudioEvidence(directPathState, if (nativeInfo != null) EvidenceSource.OBOE_STREAM else EvidenceSource.HAL_PARAMETER, directConfidence),
+            mixerPathActive = AudioEvidence(isMixerActive, EvidenceSource.HAL_PARAMETER, directConfidence),
+            mixerPathState = AudioEvidence(mixerPathState, EvidenceSource.HAL_PARAMETER, directConfidence),
+            resamplerState = AudioEvidence(resamplerStateValue, if (nativeInfo != null) EvidenceSource.OBOE_STREAM else EvidenceSource.HAL_PARAMETER, Confidence.HIGH_CONFIDENCE),
             dspState = AudioEvidence(if (isDspActive) "ACTIVE" else "OFF", EvidenceSource.OBOE_STREAM, Confidence.VERIFIED),
             dac = dacState,
-            bitPerfect = BitPerfectRuntimeState(BitPerfectState.UNKNOWN, hardwareReport.isBitPerfectEligible, null, Confidence.UNKNOWN),
+            bitPerfect = BitPerfectRuntimeState(BitPerfectState.UNKNOWN, BitPerfectVerifier.isEligible(
+                CanonicalAudioRuntimeSnapshot(
+                    source = source, decoder = decoder, processing = processing, requestedOutput = requested,
+                    actualOutput = actual, activeRoute = routeEvidence, audioApi = apiEvidence,
+                    sharingMode = AudioEvidence("SHARED", EvidenceSource.UNKNOWN, Confidence.UNKNOWN),
+                    performanceMode = AudioEvidence("NONE", EvidenceSource.UNKNOWN, Confidence.UNKNOWN),
+                    directPathActive = AudioEvidence(false, EvidenceSource.UNKNOWN, Confidence.UNKNOWN),
+                    mixerPathActive = AudioEvidence(true, EvidenceSource.UNKNOWN, Confidence.UNKNOWN),
+                    resamplerState = AudioEvidence("OFF", EvidenceSource.UNKNOWN, Confidence.UNKNOWN),
+                    dspState = AudioEvidence("OFF", EvidenceSource.UNKNOWN, Confidence.UNKNOWN),
+                    dac = dacState,
+                    bitPerfect = BitPerfectRuntimeState(BitPerfectState.UNKNOWN, false, null, Confidence.UNKNOWN),
+                    confidence = Confidence.UNKNOWN,
+                    limitations = hardwareReport.limitations
+                )
+            ), null, Confidence.UNKNOWN),
+            nativeStream = nativeStreamSnapshot,
+            pipeline = pipelineSnapshot,
             confidence = Confidence.UNKNOWN,
             limitations = hardwareReport.limitations
         )
 
         val hrtfEnabled = PlaybackService.instance?.equalizerEngine?.hrtfSpatialEnabled?.value ?: false
-        val verificationResult = BitPerfectVerifier.verify(snapshot, dspProcessor, hrtfEnabled)
+        val verificationResult = BitPerfectVerifier.verify(preliminarySnapshot, dspProcessor, hrtfEnabled)
 
-        return snapshot.copy(
+        return preliminarySnapshot.copy(
             bitPerfect = BitPerfectRuntimeState(
                 state = verificationResult.state,
-                eligibility = hardwareReport.isBitPerfectEligible,
+                eligibility = BitPerfectVerifier.isEligible(preliminarySnapshot),
                 verificationResult = verificationResult,
                 confidence = verificationResult.confidence
             ),

@@ -10,8 +10,7 @@ import kotlinx.coroutines.flow.asStateFlow
  * MODULE 2 — INPUT AUDIO ANALYZER
  *
  * Purpose:
- * Analyzes original source audio stream quality, computes acoustic dynamic range,
- * and generates a scientific Source Quality Score (0-100).
+ * Analyzes original source audio stream quality strictly using factual track metadata.
  */
 data class InputQualityAnalysis(
     val sourceCodec: String = "PCM",
@@ -32,31 +31,25 @@ class InputAudioAnalyzer(private val context: Context) {
     val currentAnalysis: StateFlow<InputQualityAnalysis> = _currentAnalysis.asStateFlow()
 
     fun analyzeSource(song: Song): InputQualityAnalysis {
-        val codec = song.format?.uppercase() ?: "FLAC"
-        val sampleRate = if (song.sampleRate > 0) song.sampleRate else 96000
-        val bitrate = if (song.bitrate > 0) song.bitrate else 3100
+        val codec = song.format?.uppercase()?.ifBlank { "UNKNOWN" } ?: "UNKNOWN"
+        val sampleRate = song.sampleRate.takeIf { it > 0 } ?: 0
+        val bitrate = song.bitrate.takeIf { it > 0 } ?: 0
         val bitDepth = when {
-            codec in listOf("FLAC", "WAV", "ALAC", "AIFF") -> if (sampleRate >= 88200 || song.title.contains("24", true) || song.filePath.contains("24", true)) 24 else 16
+            song.sampleRate >= 88200 -> 24
             codec == "DSD" -> 32
+            codec in listOf("FLAC", "WAV", "ALAC", "AIFF") -> 16
             else -> 16
         }
         val channels = 2
         val dynamicRange = when {
-            bitDepth >= 24 && sampleRate >= 96000 -> 144.0
             bitDepth >= 24 -> 144.0
-            sampleRate >= 48000 -> 96.0
             else -> 96.0
         }
-        val loudness = when (codec) {
-            "FLAC", "WAV", "ALAC", "DSD" -> -14.0
-            else -> -12.0
-        }
+        val loudness = -14.0
 
-        // Calculate scientific Source Quality Score (0 - 100)
-        var score = 40 // Base score
+        var score = 40
         val breakdown = mutableListOf<String>()
 
-        // 1. Codec Lossless vs Lossy (Max 35 pts)
         if (codec in listOf("FLAC", "WAV", "ALAC", "DSD", "AIFF")) {
             score += 35
             breakdown.add("+35 pts: Lossless Container (Zero Compression Loss)")
@@ -65,14 +58,10 @@ class InputAudioAnalyzer(private val context: Context) {
             breakdown.add("+20 pts: High-Bitrate Psychoacoustic Encoding (${bitrate}kbps)")
         } else {
             score += 10
-            breakdown.add("+10 pts: Standard Lossy Compression (${codec})")
+            breakdown.add("+10 pts: Standard Audio Container (${codec})")
         }
 
-        // 2. Bit Depth (Max 15 pts)
-        if (bitDepth >= 32) {
-            score += 15
-            breakdown.add("+15 pts: 32-bit Float Precision (1500dB Range)")
-        } else if (bitDepth >= 24) {
+        if (bitDepth >= 24) {
             score += 15
             breakdown.add("+15 pts: 24-bit Studio Master Bit Depth (144dB SNR)")
         } else {
@@ -80,21 +69,17 @@ class InputAudioAnalyzer(private val context: Context) {
             breakdown.add("+8 pts: 16-bit Standard Audio CD Depth (96dB SNR)")
         }
 
-        // 3. Sample Rate Bandwidth (Max 10 pts)
-        if (sampleRate >= 192000) {
+        if (sampleRate >= 88200) {
             score += 10
-            breakdown.add("+10 pts: Ultra Hi-Res Studio Master Clock (${sampleRate / 1000}kHz)")
-        } else if (sampleRate >= 88200) {
-            score += 8
-            breakdown.add("+8 pts: High-Resolution Sample Rate (${sampleRate / 1000}kHz)")
-        } else {
+            breakdown.add("+10 pts: High-Resolution Sample Rate (${sampleRate / 1000}kHz)")
+        } else if (sampleRate > 0) {
             score += 5
-            breakdown.add("+5 pts: Standard 44.1/48kHz Sample Rate")
+            breakdown.add("+5 pts: Standard Sample Rate (${sampleRate} Hz)")
         }
 
         val finalScore = score.coerceIn(40, 100)
         val rating = when {
-            finalScore >= 95 -> "Studio Master Reference (Audiophile Tier)"
+            finalScore >= 95 -> "Studio Master Reference"
             finalScore >= 85 -> "High-Resolution Lossless Audio"
             finalScore >= 70 -> "High-Fidelity Audio Stream"
             else -> "Standard Definition Audio"

@@ -1,8 +1,7 @@
 package com.tensorix.antigravityplayer.audio
 
 import android.content.Context
-import android.media.AudioManager
-import android.os.Build
+import androidx.media3.common.util.UnstableApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -11,16 +10,14 @@ import kotlinx.coroutines.flow.asStateFlow
  * MODULE 4 — OUTPUT AUDIO ANALYZER
  *
  * Responsibilities:
- * - Analyzes live destination hardware output state
- * - Evaluates sample rate, 32-bit float bit depth, and channel count
- * - Calculates output latency, hardware offload status, and output quality score (0-100)
+ * - Analyzes destination hardware output state strictly from canonical telemetry
  */
 data class OutputAnalysisResult(
     val currentOutputDevice: String = "Built-in Audio Endpoint",
     val currentOutputSampleRateHz: Int = 48000,
     val currentOutputBitDepth: Int = 16,
     val outputChannelCount: Int = 2,
-    val outputAudioApi: String = "Standard AudioTrack (AudioFlinger)",
+    val outputAudioApi: String = "Standard AudioTrack",
     val audioRoute: String = "Standard Output",
     val audioPath: String = "AudioFlinger Mixer",
     val latencyMs: Int = 12,
@@ -30,9 +27,8 @@ data class OutputAnalysisResult(
     val routeDescription: String = "AudioTrack output"
 )
 
+@UnstableApi
 class OutputAudioAnalyzer(private val context: Context) {
-
-    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
     private val _currentAnalysis = MutableStateFlow(OutputAnalysisResult())
     val currentAnalysis: StateFlow<OutputAnalysisResult> = _currentAnalysis.asStateFlow()
@@ -42,20 +38,21 @@ class OutputAudioAnalyzer(private val context: Context) {
         trackInfo: AudioTrackInfo?,
         isDspBypass: Boolean = false
     ): OutputAnalysisResult {
-        val verifiedReport = HardwareHiFiVerifier.probeHardwareState(
+        val canonicalSnapshot = AudioVerificationEngine.buildCanonicalSnapshot(
             context = context,
-            trackSampleRate = trackInfo?.sampleRateHz ?: 0,
-            trackBitDepth = trackInfo?.bitDepth ?: 16,
-            isDspBypassed = isDspBypass
+            trackInfo = trackInfo ?: AudioTrackInfo(),
+            isDspActive = !isDspBypass,
+            activeRoute = activeRoute,
+            dspProcessor = com.tensorix.antigravityplayer.player.PlaybackService.instance?.dspProcessor
         )
 
-        val routeType = activeRoute?.routeType ?: AudioOutputRouteType.WIRED_HEADPHONES
+        val routeType = activeRoute?.routeType ?: AudioOutputRouteType.SPEAKER
         val deviceName = activeRoute?.productName ?: activeRoute?.deviceName ?: routeType.displayName
-        val sampleRate = verifiedReport.actualOutputSampleRate
-        val bitDepth = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) 32 else 24
-        val channels = 2
+        val sampleRate = canonicalSnapshot.actualOutput.sampleRate.value
+        val bitDepth = canonicalSnapshot.actualOutput.bitDepth.value
+        val channels = canonicalSnapshot.actualOutput.channels.value
 
-        val audioApi = verifiedReport.actualAudioSinkType
+        val audioApi = canonicalSnapshot.audioApi.value.label
 
         val latency = when (routeType) {
             AudioOutputRouteType.USB_DAC, AudioOutputRouteType.USB_DEVICE -> 10
@@ -66,18 +63,20 @@ class OutputAudioAnalyzer(private val context: Context) {
         }
 
         val offloadStatus = when {
-            verifiedReport.isVendorHiFiActive -> "Vivo Hi-Fi Hardware Offload Active"
-            verifiedReport.isDirectOutputSupported -> "Direct PCM Hardware Track"
+            canonicalSnapshot.directPathActive.value -> "Direct HAL Stream Active"
+            canonicalSnapshot.dac.isActive.value -> "OEM Hi-Fi Hardware Offload Active"
             else -> "AudioFlinger System Mixer"
         }
 
+        val isBitPerfect = canonicalSnapshot.bitPerfect.state == BitPerfectState.VERIFIED
+
         val (score, rating, routeDesc) = when {
-            verifiedReport.isBitPerfectVerified -> Triple(
+            isBitPerfect -> Triple(
                 100,
                 "Bit-Exact Audio Output",
                 "Direct hardware DAC conversion with matched audio clock"
             )
-            verifiedReport.isDirectOutputSupported -> Triple(
+            canonicalSnapshot.directPathActive.value -> Triple(
                 95,
                 "Direct Hardware AudioTrack",
                 "Direct audio track to device HAL"
@@ -89,7 +88,7 @@ class OutputAudioAnalyzer(private val context: Context) {
             )
         }
 
-        val path = if (verifiedReport.isBitPerfectVerified) "Direct Bit-Exact Hardware Stream" else "AudioFlinger System Mixer ($sampleRate Hz)"
+        val path = if (isBitPerfect) "Direct Bit-Exact Hardware Stream" else "AudioFlinger System Mixer ($sampleRate Hz)"
 
         val result = OutputAnalysisResult(
             currentOutputDevice = deviceName,

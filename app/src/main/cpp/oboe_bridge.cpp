@@ -432,13 +432,22 @@ Java_com_tensorix_antigravityplayer_audio_OboeBridge_getNativeStreamInfo(JNIEnv 
     jclass infoClass = env->FindClass("com/tensorix/antigravityplayer/audio/OboeBridge$NativeStreamInfo");
     if (!infoClass) return nullptr;
 
-    jmethodID constructor = env->GetMethodID(infoClass, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IILjava/lang/String;II)V");
+    jmethodID constructor = env->GetMethodID(infoClass, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IILjava/lang/String;IILjava/lang/String;ZJI)V");
     if (!constructor) return nullptr;
 
     jstring api = env->NewStringUTF(oboe::convertToText(stream->getAudioApi()));
     jstring sharing = env->NewStringUTF(stream->getSharingMode() == oboe::SharingMode::Exclusive ? "EXCLUSIVE" : "SHARED");
     jstring performance = env->NewStringUTF(oboe::convertToText(stream->getPerformanceMode()));
     jstring formatStr = env->NewStringUTF(oboe::convertToText(stream->getFormat()));
+    jstring stateStr = env->NewStringUTF(oboe::convertToText(stream->getState()));
+
+    bool isStarted = (stream->getState() == oboe::StreamState::Started);
+    int64_t framesWritten = stream->getFramesWritten();
+    int32_t xruns = 0;
+    auto xrunResult = stream->getXRunCount();
+    if (xrunResult) {
+        xruns = xrunResult.value();
+    }
 
     jobject info = env->NewObject(infoClass, constructor,
                                   api,
@@ -448,7 +457,11 @@ Java_com_tensorix_antigravityplayer_audio_OboeBridge_getNativeStreamInfo(JNIEnv 
                                   static_cast<jint>(stream->getChannelCount()),
                                   formatStr,
                                   static_cast<jint>(stream->getBufferSizeInFrames()),
-                                  static_cast<jint>(stream->getDeviceId()));
+                                  static_cast<jint>(stream->getDeviceId()),
+                                  stateStr,
+                                  isStarted ? JNI_TRUE : JNI_FALSE,
+                                  static_cast<jlong>(framesWritten),
+                                  static_cast<jint>(xruns));
 
     return info;
 }

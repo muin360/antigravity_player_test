@@ -32,12 +32,13 @@ class AudioInformationEngine(private val context: Context) {
         var genre = "Lossless Master"
         var year = ""
         var isVbr = false
-        var sampleRate = song.sampleRate.takeIf { it > 0 } ?: 44100
-        var bitrate = song.bitrate.takeIf { it > 0 } ?: 3100
+        var sampleRate = song.sampleRate.takeIf { it > 0 } ?: 0
+        var bitrate = song.bitrate.takeIf { it > 0 } ?: 0
         var bitDepth = when {
-            song.format?.equals("FLAC", ignoreCase = true) == true -> 24
-            song.format?.equals("WAV", ignoreCase = true) == true -> 24
-            song.format?.equals("ALAC", ignoreCase = true) == true -> 24
+            song.sampleRate >= 88200 -> 24
+            song.format?.equals("FLAC", ignoreCase = true) == true -> 16
+            song.format?.equals("WAV", ignoreCase = true) == true -> 16
+            song.format?.equals("ALAC", ignoreCase = true) == true -> 16
             song.format?.equals("DSD", ignoreCase = true) == true -> 32
             else -> 16
         }
@@ -119,8 +120,8 @@ class AudioInformationEngine(private val context: Context) {
             channelLayout = if (channels == 1) "Mono (1.0)" else "Stereo (Left / Right 2.0)",
             dynamicRangeDb = dynamicRange,
             integratedLoudnessLufs = integratedLoudness,
-            replayGainTrackDb = -1.2,
-            replayGainAlbumDb = -1.5,
+            replayGainTrackDb = 0.0,
+            replayGainAlbumDb = 0.0,
             hasEmbeddedLyrics = hasLyrics,
             hasEmbeddedArtwork = hasArt,
             fileLocation = path,

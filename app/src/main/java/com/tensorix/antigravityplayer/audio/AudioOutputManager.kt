@@ -21,11 +21,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Dedicated Audiophile Audio Output \u0026 USB DAC Route Manager
+ * Dedicated Audiophile Audio Output & USB DAC Route Manager
  * - Scans connected USB Audio Class devices via UsbManager
  * - Monitors hotplug events via AudioDeviceCallback and USB BroadcastReceivers
- * - Calculates device capability matrix across 16/24/32-bit \u0026 44.1-192kHz sample rates
- * - Constructs real-time Audiophile Signal Path Stepper and AudioFlinger limitation diagnostics
+ * - Calculates device capability matrix across 16/24/32-bit & 44.1-192kHz sample rates
+ * - Strictly correlates active playback endpoint with real runtime stream state
  */
 @UnstableApi
 class AudioOutputManager(private val context: Context) {
@@ -41,6 +41,7 @@ class AudioOutputManager(private val context: Context) {
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            AudioEngineController.invalidate()
             forceRefresh()
         }
     }
@@ -48,10 +49,12 @@ class AudioOutputManager(private val context: Context) {
     private val deviceCallback = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
         object : AudioDeviceCallback() {
             override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+                AudioEngineController.invalidate()
                 forceRefresh()
             }
 
             override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+                AudioEngineController.invalidate()
                 forceRefresh()
             }
         }
@@ -59,12 +62,10 @@ class AudioOutputManager(private val context: Context) {
 
     init {
         updateCache()
-        // Register Live Audio Device Callback
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && deviceCallback != null) {
             audioManager.registerAudioDeviceCallback(deviceCallback, null)
         }
 
-        // Register USB & Wired Headphone Plug/Unplug receivers
         val filter = IntentFilter().apply {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
@@ -76,6 +77,7 @@ class AudioOutputManager(private val context: Context) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 context.registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
             } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
                 context.registerReceiver(usbReceiver, filter)
             }
         } catch (e: Exception) {
@@ -87,6 +89,7 @@ class AudioOutputManager(private val context: Context) {
         VendorDacManager.activateHardwareDac(context)
         cachedRoutes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .filter { it.isSink }
                 .map { device -> device.toCapability() }
                 .sortedBy { it.routeType.ordinal }
         } else {
@@ -114,15 +117,21 @@ class AudioOutputManager(private val context: Context) {
         }
     }
 
-    fun supportedSampleRates(): List<Int> = listOf(
+    /**
+     * Formats supported by the Antigravity Player Engine (not a representation of hardware DAC limits).
+     */
+    fun engineSupportedSampleRates(): List<Int> = listOf(
         44100, 48000, 88200, 96000, 176400, 192000
     )
 
-    fun supportedBitDepths(): List<Int> = listOf(16, 24, 32)
+    fun supportedSampleRates(): List<Int> = engineSupportedSampleRates()
+
+    fun engineSupportedBitDepths(): List<Int> = listOf(16, 24, 32)
+
+    fun supportedBitDepths(): List<Int> = engineSupportedBitDepths()
 
     /**
-     * PRODUCTION-GRADE DIRECT PLAYBACK SUPPORT CHECK
-     * Supports API 26 to 34+ correctly.
+     * Real per-format probing for Direct Playback capability (API 26-34+).
      */
     fun checkDirectPlaybackSupport(context: Context, audioAttributes: AudioAttributes, audioFormat: AudioFormat): Boolean {
         return if (Build.VERSION.SDK_INT >= 33) {
@@ -142,10 +151,7 @@ class AudioOutputManager(private val context: Context) {
                 false
             }
         } else {
-            // Pre-API 29: assume direct path available if wired output connected
-            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            @Suppress("DEPRECATION")
-            am.isWiredHeadsetOn
+            false
         }
     }
 
@@ -170,7 +176,10 @@ class AudioOutputManager(private val context: Context) {
                     val deviceClass = device.deviceClass
                     val deviceSubclass = device.deviceSubclass
 
-                    val audioDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                    val audioDevices = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                    } else emptyArray()
+
                     val deviceInfo = audioDevices.find { 
                         (it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET) &&
                         it.productName?.toString() == (prodName ?: "")
@@ -187,16 +196,20 @@ class AudioOutputManager(private val context: Context) {
                             deviceSubclass = deviceSubclass,
                             interfaceCount = interfaceCount,
                             isAudioClassCompliant = true,
-                            supportedSampleRates = deviceInfo?.sampleRates?.filter { it > 0 }?.sorted() ?: emptyList(),
-                            supportedBitDepths = deviceInfo?.encodings?.map { enc ->
-                                when (enc) {
-                                    android.media.AudioFormat.ENCODING_PCM_16BIT -> 16
-                                    android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> 24
-                                    android.media.AudioFormat.ENCODING_PCM_32BIT -> 32
-                                    android.media.AudioFormat.ENCODING_PCM_FLOAT -> 32
-                                    else -> 0
-                                }
-                            }?.filter { it > 0 }?.distinct()?.sorted() ?: emptyList()
+                            supportedSampleRates = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                deviceInfo?.sampleRates?.filter { it > 0 }?.sorted() ?: emptyList()
+                            } else emptyList(),
+                            supportedBitDepths = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                deviceInfo?.encodings?.map { enc ->
+                                    when (enc) {
+                                        AudioFormat.ENCODING_PCM_16BIT -> 16
+                                        AudioFormat.ENCODING_PCM_24BIT_PACKED -> 24
+                                        AudioFormat.ENCODING_PCM_32BIT -> 32
+                                        AudioFormat.ENCODING_PCM_FLOAT -> 32
+                                        else -> 0
+                                    }
+                                }?.filter { it > 0 }?.distinct()?.sorted() ?: emptyList()
+                            } else emptyList()
                         )
                     )
                 }
@@ -224,19 +237,26 @@ class AudioOutputManager(private val context: Context) {
         val routes = cachedRoutes
         val usbDacs = cachedUsbDacs
 
-        // 1. Identify ACTUALLY ACTIVE route from system
-        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val activeDevices = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-        } else emptyArray()
-        
-        // Find the device that is actually sink and currently active
-        // On many Android devices, multiple devices might be returned, but only one is "active"
-        // We use a heuristic: the first USB or Wired device, or Speaker.
-        val activeDevice = activeDevices.firstOrNull { it.isSink && it.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-                          ?: activeDevices.firstOrNull { it.isSink && it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+        // 1. Identify ACTUALLY ACTIVE route from correlated runtime evidence
+        val nativeInfo = OboeAudioSink.currentStreamInfo
+        val activeDevice: AudioDeviceInfo? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).filter { it.isSink }
+            if (nativeInfo != null && nativeInfo.deviceId > 0) {
+                outputDevices.firstOrNull { it.id == nativeInfo.deviceId }
+            } else {
+                // If stream is active on non-speaker, find the matching attached sink
+                val nonSpeaker = outputDevices.filter { it.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER && it.type != AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+                if (nonSpeaker.size == 1) {
+                    nonSpeaker.first()
+                } else if (nonSpeaker.isEmpty()) {
+                    outputDevices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                } else {
+                    null // Ambiguous route correlation -> UNKNOWN
+                }
+            }
+        } else null
 
-        // Correlate with cached capabilities - MUST be precise
+        // Correlate with cached capabilities
         val activeRoute = activeDevice?.let { dev ->
             val devName = dev.productName?.toString() ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) dev.address else null
             routes.find { it.deviceName == (devName ?: it.routeType.displayName) }
@@ -419,46 +439,15 @@ class AudioOutputManager(private val context: Context) {
         return stages
     }
 
-    private fun buildDeviceLimitations(route: AudioRouteCapability?, trackInfo: AudioTrackInfo?): List<String> {
-        if (route == null) {
-            return listOf("No external audio route detected. Output will play through built-in speaker.")
-        }
-        val issues = mutableListOf<String>()
-
-        if (route.routeType == AudioOutputRouteType.BLUETOOTH_A2DP) {
-            issues.add("Bluetooth A2DP uses lossy compression (SBC/AAC/LDAC) and is not bit-perfect.")
-        }
-        if (route.routeType == AudioOutputRouteType.SPEAKER || route.routeType == AudioOutputRouteType.BUILT_IN_EARPIECE) {
-            issues.add("Built-in speaker route is processed by Android AudioFlinger system mixer.")
-        }
-        if (trackInfo != null && trackInfo.sampleRateHz > 48000 && !route.sampleRates.contains(trackInfo.sampleRateHz)) {
-            issues.add("Target route does not advertise ${trackInfo.sampleRateHz / 1000} kHz; hardware driver may resample.")
-        }
-        val isDirectOrVendorActive = route.isDirectPlaybackCapable ||
-                route.routeType == AudioOutputRouteType.USB_DAC ||
-                VendorDacManager.isVivoHiFiActive ||
-                VendorDacManager.isLgQuadDacActive ||
-                VendorDacManager.isQualcommDirectActive
-        if (!isDirectOrVendorActive && route.routeType != AudioOutputRouteType.USB_DAC) {
-            issues.add("Standard AudioFlinger mixer path is active for this route.")
-        }
-        return issues
-    }
-
     private fun AudioDeviceInfo.toCapability(): AudioRouteCapability {
         val encodings = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) this.encodings.toList() else emptyList()
         val sampleRates = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) this.sampleRates.toList() else emptyList()
         val channelCounts = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) this.channelCounts.toList() else emptyList()
 
-        // Universal Direct Output Probing across API 26-34+ via HardwareHiFiVerifier
         val verifiedReport = HardwareHiFiVerifier.probeHardwareState(context)
         val routeType = toRouteType()
         
-        val directSupport = verifiedReport.isDirectOutputSupported ||
-                verifiedReport.isVendorHiFiActive ||
-                routeType == AudioOutputRouteType.USB_DAC ||
-                routeType == AudioOutputRouteType.WIRED_HEADPHONES ||
-                routeType == AudioOutputRouteType.WIRED_HEADSET
+        val directSupport = verifiedReport.isDirectOutputSupported || verifiedReport.isVendorHiFiActive
 
         val name = when {
             !productName.isNullOrBlank() -> productName.toString()

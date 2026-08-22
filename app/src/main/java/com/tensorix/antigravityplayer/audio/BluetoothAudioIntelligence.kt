@@ -53,50 +53,38 @@ class BluetoothAudioIntelligence(private val context: Context) {
             return inactive
         }
 
-        val name = btDevice.productName?.toString() ?: "Bluetooth Audio Device"
-        val codec = detectCodecFromName(name)
-        val (bitrate, mode, rate, score, quality) = when (codec) {
-            "LDAC" -> Quintuple(990, "Audiophile Master (990 kbps)", 96000, 98, "Near-Lossless Studio Reference")
-            "aptX HD" -> Quintuple(576, "Studio Wireless (576 kbps)", 48000, 90, "High-Resolution 24-bit Wireless")
-            "aptX Adaptive" -> Quintuple(420, "Dynamic Low Latency (420 kbps)", 96000, 88, "Adaptive High-Definition Audio")
-            "aptX" -> Quintuple(384, "Lossless Sub-band (384 kbps)", 44100, 82, "Standard High-Fidelity Audio")
-            "LC3" -> Quintuple(345, "LE Audio High Efficiency", 48000, 85, "Next-Gen Low-Energy Audio")
-            "AAC" -> Quintuple(320, "Apple High-Fidelity AAC", 44100, 78, "Standard Compressed Audio")
-            else -> Quintuple(328, "Standard Sub-band (SBC)", 44100, 65, "Legacy Compressed Stream")
+        val codecParam = audioManager.getParameters("bluetooth_a2dp_codec") ?: ""
+        val codec = when {
+            codecParam.contains("ldac", ignoreCase = true) -> "LDAC"
+            codecParam.contains("aptx_hd", ignoreCase = true) -> "aptX HD"
+            codecParam.contains("aptx_adaptive", ignoreCase = true) -> "aptX Adaptive"
+            codecParam.contains("aptx", ignoreCase = true) -> "aptX"
+            codecParam.contains("aac", ignoreCase = true) -> "AAC"
+            codecParam.contains("sbc", ignoreCase = true) -> "SBC"
+            else -> "Bluetooth A2DP (Standard)"
         }
 
         val warnings = mutableListOf<String>()
+        warnings.add("Bluetooth A2DP involves lossy wireless compression and cannot achieve Bit-Perfect verification")
         if (codec == "SBC") {
-            warnings.add("Lossy Codec Downgrade Detected (SBC Active — Switch to LDAC/aptX in Developer Settings)")
+            warnings.add("Standard SBC codec active. Check Developer Settings for LDAC / aptX HD options")
         }
 
         val status = BluetoothIntelligenceStatus(
             isBluetoothActive = true,
             currentCodec = codec,
-            currentBitrateKbps = bitrate,
-            qualityMode = mode,
-            sampleRateHz = rate,
-            linkStabilityScore = score,
+            currentBitrateKbps = 0, // Not exposed via public Android API
+            qualityMode = "Bluetooth A2DP ($codec)",
+            sampleRateHz = 44100,
+            linkStabilityScore = 0,
             signalStrengthDbm = 0,
             connectionQuality = "A2DP Wireless Link",
-            estimatedAudioQuality = quality,
+            estimatedAudioQuality = "Compressed Wireless Audio ($codec)",
             activeWarnings = warnings
         )
 
         _currentStatus.value = status
         return status
-    }
-
-    private fun detectCodecFromName(name: String): String {
-        return when {
-            name.contains("LDAC", ignoreCase = true) || name.contains("WH-1000", ignoreCase = true) || name.contains("WF-1000", ignoreCase = true) -> "LDAC"
-            name.contains("aptx hd", ignoreCase = true) -> "aptX HD"
-            name.contains("adaptive", ignoreCase = true) -> "aptX Adaptive"
-            name.contains("aptx", ignoreCase = true) -> "aptX"
-            name.contains("lc3", ignoreCase = true) -> "LC3"
-            name.contains("airpod", ignoreCase = true) || name.contains("aac", ignoreCase = true) -> "AAC"
-            else -> "SBC / AAC"
-        }
     }
 }
 

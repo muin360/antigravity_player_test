@@ -30,12 +30,14 @@ class OboeAudioSink(
     companion object {
         private const val TAG_LOG = "OboeAudioSink"
         @Volatile
+        @JvmStatic
         var currentActiveHandle: Long = 0L
-            private set
+            internal set
         
         @Volatile
+        @JvmStatic
         var currentStreamInfo: OboeBridge.NativeStreamInfo? = null
-            private set
+            internal set
     }
 
     private var streamHandle: Long = 0L
@@ -312,9 +314,9 @@ class OboeAudioSink(
     }
 
     override fun setVolume(volume: Float) {
-        this.volume = volume
-        fallbackSink?.setVolume(volume)
-        if (streamHandle != 0L) {
+        this.volume = if (bitPerfectMode) 1.0f else volume
+        fallbackSink?.setVolume(this.volume)
+        if (streamHandle != 0L && !bitPerfectMode) {
             OboeBridge.setDvcVolume(streamHandle, volume.toDouble())
         }
     }
@@ -421,6 +423,7 @@ class OboeAudioSink(
                 currentStreamInfo = null
             }
             streamHandle = 0L
+            AudioEngineController.invalidate()
         }
     }
 }

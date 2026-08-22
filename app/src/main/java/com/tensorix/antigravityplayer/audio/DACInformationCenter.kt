@@ -93,6 +93,31 @@ class DACInformationCenter(private val context: Context) {
                         runCatching { device.productName }.getOrNull()
                     } else null
 
+                    val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+                    val audioDevices = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        audioManager?.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS) ?: emptyArray()
+                    } else emptyArray()
+
+                    val deviceInfo = audioDevices.find { 
+                        (it.type == android.media.AudioDeviceInfo.TYPE_USB_DEVICE || it.type == android.media.AudioDeviceInfo.TYPE_USB_HEADSET) &&
+                        it.productName?.toString() == (prodName ?: "")
+                    }
+
+                    val rates = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        deviceInfo?.sampleRates?.filter { it > 0 }?.sorted() ?: emptyList()
+                    } else emptyList()
+
+                    val bitDepths = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        deviceInfo?.encodings?.map { enc ->
+                            when (enc) {
+                                android.media.AudioFormat.ENCODING_PCM_16BIT -> 16
+                                android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> 24
+                                android.media.AudioFormat.ENCODING_PCM_32BIT, android.media.AudioFormat.ENCODING_PCM_FLOAT -> 32
+                                else -> 0
+                            }
+                        }?.filter { it > 0 }?.distinct()?.sorted() ?: emptyList()
+                    } else emptyList()
+
                     return UsbDacInfo(
                         deviceName = device.deviceName,
                         manufacturerName = mfgName,
@@ -103,8 +128,8 @@ class DACInformationCenter(private val context: Context) {
                         deviceSubclass = device.deviceSubclass,
                         interfaceCount = device.interfaceCount,
                         isAudioClassCompliant = true,
-                        supportedSampleRates = listOf(44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000),
-                        supportedBitDepths = listOf(16, 24, 32)
+                        supportedSampleRates = rates,
+                        supportedBitDepths = bitDepths
                     )
                 }
             }

@@ -751,7 +751,23 @@ class PlaybackService : MediaSessionService() {
         Log.i("HiFiPlayer", "Bit-Perfect Mode changed: $enabled")
         dspProcessor.isBitPerfectBypass = enabled
         dspProcessor.isEnabled = !enabled
+        if (enabled) {
+            dspProcessor.dvcVolume = 1.0
+            dspProcessor.preAmpGainDb = 0.0
+            dspProcessor.replayGainMultiplier = 1.0
+            dspProcessor.ditherStrength = 0.0
+            dspProcessor.channelBalance = 0.0
+            dspProcessor.limiterEnabled = false
+            dspProcessor.crossfeedLevel = 0.0
+            dspProcessor.airPresenceGainDb = 0.0
+            dspProcessor.clarityEnhancerGain = 0.0
+            dspProcessor.warmSaturationLevel = 0.0
+            dspProcessor.triodeWarmthLevel = 0.0
+            dspProcessor.pentodeTapeLevel = 0.0
+            dspProcessor.harmonicExciterLevel = 0.0
+        }
         equalizerEngine?.setBitPerfectBypass(enabled)
+        AudioEngineController.invalidate()
         reloadAudioPipeline()
     }
 

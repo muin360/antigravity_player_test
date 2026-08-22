@@ -117,7 +117,7 @@ class UniversalHiFiEngine(private val context: Context) {
             activeDac = dac,
             activeDevice = device,
             platformCapabilities = platform,
-            isBitPerfectActive = state == UniversalHiFiState.BIT_PERFECT_VERIFIED || state == UniversalHiFiState.USB_BIT_PERFECT || state == UniversalHiFiState.BIT_PERFECT_ACTIVE_UNVERIFIED,
+            isBitPerfectActive = state == UniversalHiFiState.BIT_PERFECT_VERIFIED || state == UniversalHiFiState.USB_BIT_PERFECT,
             sampleRateHz = trackSampleRate,
             bitDepth = trackBitDepth,
             audioSessionId = audioSessionId,

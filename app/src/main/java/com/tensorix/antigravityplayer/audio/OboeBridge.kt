@@ -74,7 +74,11 @@ object OboeBridge {
         val channelCount: Int,
         val format: String,
         val bufferSize: Int,
-        val deviceId: Int
+        val deviceId: Int,
+        val state: String = "Open",
+        val isStarted: Boolean = true,
+        val framesWritten: Long = 0L,
+        val underrunCount: Int = 0
     )
 
     external fun getNativeStreamInfo(handle: Long): NativeStreamInfo?
