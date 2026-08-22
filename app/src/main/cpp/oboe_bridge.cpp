@@ -39,6 +39,69 @@ public:
         }
     }
 
+    void flush() {
+        std::lock_guard<std::mutex> lock(streamMutex);
+        if (stream) {
+            auto state = stream->getState();
+            if (state == oboe::StreamState::Started) {
+                stream->requestPause();
+                stream->flush();
+                stream->requestStart();
+            } else {
+                stream->flush();
+            }
+        }
+        resampleBuffer.clear();
+    }
+
+    void pause() {
+        std::lock_guard<std::mutex> lock(streamMutex);
+        if (stream && stream->getState() == oboe::StreamState::Started) {
+            stream->requestPause();
+        }
+    }
+
+    void start() {
+        std::lock_guard<std::mutex> lock(streamMutex);
+        if (stream && (stream->getState() == oboe::StreamState::Paused || stream->getState() == oboe::StreamState::Open)) {
+            stream->requestStart();
+        }
+    }
+
+    int64_t getPlaybackPositionFrames() {
+        std::lock_guard<std::mutex> lock(streamMutex);
+        if (!stream) return 0;
+
+        int64_t framePosition = 0;
+        int64_t timeNanoseconds = 0;
+        auto result = stream->getTimestamp(CLOCK_MONOTONIC, &framePosition, &timeNanoseconds);
+        if (result == oboe::Result::OK && timeNanoseconds > 0) {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            int64_t nowNs = static_cast<int64_t>(ts.tv_sec) * 1000000000LL + static_cast<int64_t>(ts.tv_nsec);
+            int64_t deltaNs = nowNs - timeNanoseconds;
+            if (deltaNs >= 0 && stream->getSampleRate() > 0) {
+                int64_t extrapolated = framePosition + (deltaNs * stream->getSampleRate() / 1000000000LL);
+                return std::max<int64_t>(0, std::min<int64_t>(extrapolated, stream->getFramesWritten()));
+            }
+            return std::max<int64_t>(0, std::min<int64_t>(framePosition, stream->getFramesWritten()));
+        }
+
+        auto framesRead = stream->getFramesRead();
+        if (framesRead > 0) {
+            return std::max<int64_t>(0, std::min<int64_t>(framesRead, stream->getFramesWritten()));
+        }
+        int32_t bufferSize = stream->getBufferSizeInFrames();
+        return std::max<int64_t>(0, stream->getFramesWritten() - static_cast<int64_t>(bufferSize));
+    }
+
+    int64_t getPlaybackTimestampUs() {
+        int64_t frames = getPlaybackPositionFrames();
+        std::lock_guard<std::mutex> lock(streamMutex);
+        if (!stream || stream->getSampleRate() <= 0) return 0;
+        return (frames * 1000000LL) / stream->getSampleRate();
+    }
+
 
 
     void onErrorAfterClose(oboe::AudioStream *audioStream, oboe::Result error) override {
@@ -197,6 +260,36 @@ Java_com_tensorix_antigravityplayer_audio_OboeBridge_closeStream(JNIEnv *env, jo
         delete wrapper;
         LOGI("Oboe Stream Terminated cleanly");
     }
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_flushStream(JNIEnv *env, jobject thiz, jlong handle) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->flush();
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_pauseStream(JNIEnv *env, jobject thiz, jlong handle) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->pause();
+}
+
+JNIEXPORT void JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_startStream(JNIEnv *env, jobject thiz, jlong handle) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    if (wrapper) wrapper->start();
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_getPlaybackPositionFrames(JNIEnv *env, jobject thiz, jlong handle) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    return wrapper ? static_cast<jlong>(wrapper->getPlaybackPositionFrames()) : 0L;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_tensorix_antigravityplayer_audio_OboeBridge_getPlaybackTimestampUs(JNIEnv *env, jobject thiz, jlong handle) {
+    auto *wrapper = reinterpret_cast<OboeStreamWrapper *>(handle);
+    return wrapper ? static_cast<jlong>(wrapper->getPlaybackTimestampUs()) : 0L;
 }
 
 JNIEXPORT jint JNICALL

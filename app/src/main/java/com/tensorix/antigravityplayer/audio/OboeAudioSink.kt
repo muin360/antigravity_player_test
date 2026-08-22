@@ -19,11 +19,21 @@ import com.tensorix.antigravityplayer.player.PlaybackService
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+/**
+ * Production-Safe High-Performance Audiophile Oboe AudioSink for Media3 / ExoPlayer.
+ * 
+ * Complies strictly with the Media3 AudioSink contract:
+ * - Precise hardware-clock position tracking via Oboe/AAudio getTimestamp
+ * - Real flush, seek, and discontinuity semantics
+ * - Accurate partial-write consumption (returns true ONLY when buffer is fully consumed)
+ * - Dynamic Bit-Perfect Exclusive / Shared path negotiation
+ * - Graceful fallback to DefaultAudioSink if hardware cannot provide native stream
+ */
 @UnstableApi
 class OboeAudioSink(
     private val context: Context,
     private val dspProcessor: Audiophile64BitDspProcessor? = null,
-    private val bitPerfectMode: Boolean = false,
+    private var bitPerfectMode: Boolean = false,
     private val onExclusiveModeChanged: (Boolean) -> Unit = {}
 ) : AudioSink {
 
@@ -52,13 +62,26 @@ class OboeAudioSink(
     private var isPlaying = false
     private var floatBuffer = FloatArray(8192)
 
-    private val fallbackSink: DefaultAudioSink? by lazy {
-        if (!OboeBridge.isAvailable || bitPerfectMode) {
-             DefaultAudioSink.Builder(context)
-                .setAudioProcessors(if (dspProcessor != null) arrayOf(dspProcessor) else emptyArray())
-                .setEnableFloatOutput(!bitPerfectMode)
-                .build()
-        } else null
+    private var startMediaTimeUs: Long = C.TIME_UNSET
+    private var isSeekingOrDiscontinuous: Boolean = false
+    private var preferredDevice: AudioDeviceInfo? = null
+
+    // Fallback sink ONLY used if native Oboe library is missing or device fails native open
+    private var fallbackSink: DefaultAudioSink? = null
+
+    private fun getOrCreateFallbackSink(): DefaultAudioSink? {
+        if (fallbackSink == null) {
+            runCatching {
+                Log.w(TAG_LOG, "Initializing DefaultAudioSink fallback pipeline")
+                fallbackSink = DefaultAudioSink.Builder(context)
+                    .setAudioProcessors(if (dspProcessor != null && !bitPerfectMode) arrayOf(dspProcessor) else emptyArray())
+                    .setEnableFloatOutput(!bitPerfectMode)
+                    .build().apply {
+                        listener?.let { setListener(it) }
+                    }
+            }
+        }
+        return fallbackSink
     }
 
     override fun setListener(listener: AudioSink.Listener) {
@@ -75,24 +98,22 @@ class OboeAudioSink(
     }
 
     override fun supportsFormat(format: Format): Boolean {
-        return if (fallbackSink != null) {
-            fallbackSink!!.supportsFormat(format)
-        } else {
-            Util.isEncodingLinearPcm(format.pcmEncoding)
-        }
+        if (fallbackSink != null) return fallbackSink!!.supportsFormat(format)
+        return Util.isEncodingLinearPcm(format.pcmEncoding)
     }
 
     override fun getFormatSupport(format: Format): Int {
-        return if (fallbackSink != null) {
-            fallbackSink!!.getFormatSupport(format)
-        } else {
-            if (supportsFormat(format)) AudioSink.SINK_FORMAT_SUPPORTED_DIRECTLY else AudioSink.SINK_FORMAT_UNSUPPORTED
-        }
+        if (fallbackSink != null) return fallbackSink!!.getFormatSupport(format)
+        return if (supportsFormat(format)) AudioSink.SINK_FORMAT_SUPPORTED_DIRECTLY else AudioSink.SINK_FORMAT_UNSUPPORTED
     }
 
     override fun getCurrentPositionUs(sourceEnded: Boolean): Long {
         if (fallbackSink != null) return fallbackSink!!.getCurrentPositionUs(sourceEnded)
-        return (framesWritten * 1_000_000L) / sampleRate.coerceAtLeast(1)
+        if (streamHandle == 0L) return C.TIME_UNSET
+
+        val nativeTimestampUs = OboeBridge.getPlaybackTimestampUs(streamHandle)
+        val baseTimeUs = if (startMediaTimeUs != C.TIME_UNSET) startMediaTimeUs else 0L
+        return baseTimeUs + nativeTimestampUs
     }
 
     override fun configure(inputFormat: Format, specifiedBufferSize: Int, outputChannels: IntArray?) {
@@ -122,21 +143,61 @@ class OboeAudioSink(
         if (floatBuffer.size < estimatedSamples) {
             floatBuffer = FloatArray(estimatedSamples * 2)
         }
-        
+
         if (streamHandle == 0L && OboeBridge.isAvailable) {
             openOboeStream()
         }
-        
-        Log.i(TAG_LOG, "Configuring Native Oboe 64-bit Sink: $sampleRate Hz, $channelCount channels, Encoding: $pcmEncoding")
+
+        runCatching { Log.i(TAG_LOG, "Configured Native Oboe 64-bit Sink: $sampleRate Hz, $channelCount channels, Encoding: $pcmEncoding") }
     }
 
     override fun play() {
         isPlaying = true
+        if (streamHandle != 0L) {
+            OboeBridge.startStream(streamHandle)
+        }
         fallbackSink?.play()
     }
 
+    override fun pause() {
+        isPlaying = false
+        if (streamHandle != 0L) {
+            OboeBridge.pauseStream(streamHandle)
+        }
+        fallbackSink?.pause()
+    }
+
     override fun handleDiscontinuity() {
+        isSeekingOrDiscontinuous = true
+        startMediaTimeUs = C.TIME_UNSET
+        if (streamHandle != 0L) {
+            OboeBridge.flushStream(streamHandle)
+        }
         fallbackSink?.handleDiscontinuity()
+    }
+
+    override fun flush() {
+        framesWritten = 0L
+        startMediaTimeUs = C.TIME_UNSET
+        isSeekingOrDiscontinuous = true
+        if (streamHandle != 0L) {
+            OboeBridge.flushStream(streamHandle)
+        }
+        fallbackSink?.flush()
+    }
+
+    override fun reset() {
+        isPlaying = false
+        framesWritten = 0L
+        startMediaTimeUs = C.TIME_UNSET
+        isSeekingOrDiscontinuous = false
+        closeOboeStream()
+        fallbackSink?.reset()
+    }
+
+    override fun release() {
+        closeOboeStream()
+        fallbackSink?.release()
     }
 
     @WorkerThread
@@ -151,6 +212,15 @@ class OboeAudioSink(
 
         if (streamHandle == 0L) {
             openOboeStream()
+            if (streamHandle == 0L) {
+                // Native stream could not be opened; fallback to DefaultAudioSink
+                return getOrCreateFallbackSink()?.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount) ?: false
+            }
+        }
+
+        if (startMediaTimeUs == C.TIME_UNSET || isSeekingOrDiscontinuous) {
+            startMediaTimeUs = presentationTimeUs
+            isSeekingOrDiscontinuous = false
         }
 
         val initialPosition = buffer.position()
@@ -213,36 +283,26 @@ class OboeAudioSink(
         }
 
         val framesWrittenResult = OboeBridge.write(streamHandle, floatBuffer, numFrames)
-        if (framesWrittenResult >= 0) {
+        if (framesWrittenResult > 0) {
             framesWritten += framesWrittenResult
             
             val bytesPerFrame = channelCount * bytesPerSample
             val bytesConsumed = framesWrittenResult * bytesPerFrame
 
             buffer.position((initialPosition + bytesConsumed).coerceAtMost(buffer.limit()))
-            if (framesWrittenResult < numFrames) {
-                // Partial write, return true to let ExoPlayer know some was consumed
-                // ExoPlayer will call handleBuffer again with the remaining buffer
-                return true
-            }
-            return true
+            // Return true ONLY when buffer is fully consumed per Media3 contract
+            return !buffer.hasRemaining()
+        } else if (framesWrittenResult == 0) {
+            // Buffer was not consumed this cycle, retry later
+            return false
         }
 
-        // P0 Blocker 6: Controlled Error Handling
+        // Error code returned by Oboe
         val errorCode = framesWrittenResult
-        Log.e(TAG_LOG, "Oboe write failed with error code: $errorCode. Initiating recovery.")
-        
-        // Mark stream as invalid
+        Log.e(TAG_LOG, "Oboe write failed with error code: $errorCode. Recovering stream.")
         closeOboeStream()
-        
-        // Determine if recoverable. 
-        // In Oboe/AAudio, most write errors are non-recoverable without stream recreation.
-        // We return false here to signal to ExoPlayer that the buffer was NOT consumed.
-        // ExoPlayer will retry, and our streamHandle being 0 will trigger openOboeStream().
-        
-        // Update BitPerfect state in global snapshot if possible (via service)
+
         PlaybackService.instance?.let { service ->
-            // Trigger a re-evaluation of the bit-perfect state
             service.audioOutputManager?.forceRefresh()
         }
 
@@ -255,12 +315,14 @@ class OboeAudioSink(
 
     override fun isEnded(): Boolean {
         if (fallbackSink != null) return fallbackSink!!.isEnded
-        return !isPlaying && framesWritten > 0
+        return !isPlaying && !hasPendingData()
     }
 
     override fun hasPendingData(): Boolean {
         if (fallbackSink != null) return fallbackSink!!.hasPendingData()
-        return isPlaying && streamHandle != 0L
+        if (streamHandle == 0L) return false
+        val hwFrames = OboeBridge.getPlaybackPositionFrames(streamHandle)
+        return isPlaying && (framesWritten > hwFrames)
     }
 
     override fun setPlaybackParameters(playbackParameters: PlaybackParameters) {
@@ -298,6 +360,7 @@ class OboeAudioSink(
     }
 
     override fun setPreferredDevice(audioDeviceInfo: AudioDeviceInfo?) {
+        this.preferredDevice = audioDeviceInfo
         fallbackSink?.setPreferredDevice(audioDeviceInfo)
     }
 
@@ -321,26 +384,14 @@ class OboeAudioSink(
         }
     }
 
-    override fun pause() {
-        isPlaying = false
-        fallbackSink?.pause()
-    }
-
-    override fun flush() {
-        framesWritten = 0
-        fallbackSink?.flush()
-    }
-
-    override fun reset() {
-        isPlaying = false
-        framesWritten = 0
-        closeOboeStream()
-        fallbackSink?.reset()
-    }
-
-    override fun release() {
-        closeOboeStream()
-        fallbackSink?.release()
+    fun setBitPerfectMode(enabled: Boolean) {
+        if (this.bitPerfectMode != enabled) {
+            this.bitPerfectMode = enabled
+            if (streamHandle != 0L) {
+                closeOboeStream()
+                openOboeStream()
+            }
+        }
     }
 
     private fun openOboeStream() {
@@ -351,7 +402,7 @@ class OboeAudioSink(
                 currentStreamInfo = OboeBridge.getNativeStreamInfo(streamHandle)
                 val exclusive = OboeBridge.isExclusive(streamHandle)
                 val actualRate = OboeBridge.getSampleRate(streamHandle)
-                Log.i(TAG_LOG, "✦ Native Oboe Stream Opened: Handle=$streamHandle, Exclusive=$exclusive, Rate=$actualRate Hz ✦")
+                runCatching { Log.i(TAG_LOG, "✦ Native Oboe Stream Opened: Handle=$streamHandle, Exclusive=$exclusive, Rate=$actualRate Hz, BitPerfect=$bitPerfectMode ✦") }
                 
                 syncDspParameters(streamHandle)
                 onExclusiveModeChanged(exclusive)
@@ -362,40 +413,41 @@ class OboeAudioSink(
     private fun syncDspParameters(handle: Long) {
         val dsp = dspProcessor ?: return
         try {
-            OboeBridge.setDspEnabled(handle, dsp.isEnabled)
-            OboeBridge.setBitPerfectBypass(handle, dsp.isBitPerfectBypass)
-            OboeBridge.setPreAmpGainDb(handle, dsp.preAmpGainDb)
-            OboeBridge.setBassBoostGainDb(handle, dsp.bassBoostGainDb)
-            OboeBridge.setTrebleGainDb(handle, dsp.trebleGainDb)
-            OboeBridge.setHarmonicExciterLevel(handle, dsp.harmonicExciterLevel)
-            OboeBridge.setClarityEnhancerGain(handle, dsp.clarityEnhancerGain)
-            OboeBridge.setStereoExpansionMultiplier(handle, dsp.stereoExpansionMultiplier)
-            OboeBridge.setDvcVolume(handle, dsp.dvcVolume)
-            OboeBridge.setDitherStrength(handle, dsp.ditherStrength)
+            val isBypass = bitPerfectMode || dsp.isBitPerfectBypass
+            OboeBridge.setDspEnabled(handle, !isBypass && dsp.isEnabled)
+            OboeBridge.setBitPerfectBypass(handle, isBypass)
+            OboeBridge.setPreAmpGainDb(handle, if (isBypass) 0.0 else dsp.preAmpGainDb)
+            OboeBridge.setBassBoostGainDb(handle, if (isBypass) 0.0 else dsp.bassBoostGainDb)
+            OboeBridge.setTrebleGainDb(handle, if (isBypass) 0.0 else dsp.trebleGainDb)
+            OboeBridge.setHarmonicExciterLevel(handle, if (isBypass) 0.0 else dsp.harmonicExciterLevel)
+            OboeBridge.setClarityEnhancerGain(handle, if (isBypass) 0.0 else dsp.clarityEnhancerGain)
+            OboeBridge.setStereoExpansionMultiplier(handle, if (isBypass) 1.0 else dsp.stereoExpansionMultiplier)
+            OboeBridge.setDvcVolume(handle, if (isBypass) 1.0 else dsp.dvcVolume)
+            OboeBridge.setDitherStrength(handle, if (isBypass) 0.0 else dsp.ditherStrength)
             OboeBridge.setOutputBitDepth(handle, dsp.outputBitDepth)
-            OboeBridge.setWarmSaturationLevel(handle, dsp.warmSaturationLevel)
-            OboeBridge.setTriodeWarmthLevel(handle, dsp.triodeWarmthLevel)
-            OboeBridge.setPentodeTapeLevel(handle, dsp.pentodeTapeLevel)
-            OboeBridge.setCrossfeedLevel(handle, dsp.crossfeedLevel)
-            OboeBridge.setLimiterEnabled(handle, dsp.limiterEnabled)
+            OboeBridge.setWarmSaturationLevel(handle, if (isBypass) 0.0 else dsp.warmSaturationLevel)
+            OboeBridge.setTriodeWarmthLevel(handle, if (isBypass) 0.0 else dsp.triodeWarmthLevel)
+            OboeBridge.setPentodeTapeLevel(handle, if (isBypass) 0.0 else dsp.pentodeTapeLevel)
+            OboeBridge.setCrossfeedLevel(handle, if (isBypass) 0.0 else dsp.crossfeedLevel)
+            OboeBridge.setLimiterEnabled(handle, !isBypass && dsp.limiterEnabled)
             OboeBridge.setLimiterThresholdDb(handle, dsp.limiterThresholdDb)
-            OboeBridge.setSubBassMonoEnabled(handle, dsp.subBassMonoEnabled)
-            OboeBridge.setChannelBalance(handle, dsp.channelBalance)
-            OboeBridge.setInvertPhase(handle, dsp.invertPhase)
-            OboeBridge.setAirPresenceGainDb(handle, dsp.airPresenceGainDb)
+            OboeBridge.setSubBassMonoEnabled(handle, !isBypass && dsp.subBassMonoEnabled)
+            OboeBridge.setChannelBalance(handle, if (isBypass) 0.0 else dsp.channelBalance)
+            OboeBridge.setInvertPhase(handle, !isBypass && dsp.invertPhase)
+            OboeBridge.setAirPresenceGainDb(handle, if (isBypass) 0.0 else dsp.airPresenceGainDb)
 
             // Sync 10-band Graphic EQ & HRTF Spatial Audio from EqualizerEngine
             PlaybackService.instance?.equalizerEngine?.let { eq ->
                 eq.bandLevels.value.forEachIndexed { index, level ->
-                    OboeBridge.setBandGain(handle, index, level.toDouble() / 100.0)
+                    OboeBridge.setBandGain(handle, index, if (isBypass) 0.0 else level.toDouble() / 100.0)
                 }
-                OboeBridge.setHrtfSpatialEnabled(handle, eq.hrtfSpatialEnabled.value)
-                OboeBridge.setHrtfRoomSize(handle, eq.hrtfRoomSize.value.toDouble())
+                OboeBridge.setHrtfSpatialEnabled(handle, !isBypass && eq.hrtfSpatialEnabled.value)
+                OboeBridge.setHrtfRoomSize(handle, if (isBypass) 0.0 else eq.hrtfRoomSize.value.toDouble())
             }
 
             // Sync Active AutoEQ PEQ Bands if enabled
             PlaybackService.instance?.autoEqEngine?.let { autoEq ->
-                if (autoEq.isAutoEqEnabled.value) {
+                if (autoEq.isAutoEqEnabled.value && !isBypass) {
                     autoEq.activeProfile.value?.let { profile ->
                         OboeBridge.clearPeqBands(handle)
                         profile.bands.forEach { band ->
@@ -408,6 +460,8 @@ class OboeAudioSink(
                             )
                         }
                     }
+                } else {
+                    OboeBridge.clearPeqBands(handle)
                 }
             }
         } catch (e: Exception) {

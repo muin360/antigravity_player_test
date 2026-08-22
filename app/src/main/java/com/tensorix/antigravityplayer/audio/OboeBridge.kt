@@ -12,9 +12,9 @@ object OboeBridge {
         try {
             System.loadLibrary("antigravity_oboe")
             isAvailable = true
-            Log.i(TAG, "✦ Antigravity Native C++ Oboe 64-bit Engine Loaded Successfully ✦")
-        } catch (e: UnsatisfiedLinkError) {
-            Log.e(TAG, "Failed to load Oboe native library: ${e.message}")
+            runCatching { Log.i(TAG, "✦ Antigravity Native C++ Oboe 64-bit Engine Loaded Successfully ✦") }
+        } catch (e: Throwable) {
+            runCatching { Log.e(TAG, "Failed to load Oboe native library: ${e.message}") }
             isAvailable = false
         }
     }
@@ -22,7 +22,12 @@ object OboeBridge {
     // Core Stream Lifecycle
     external fun openStream(sampleRate: Int, channelCount: Int, bitPerfectMode: Boolean): Long
     external fun write(handle: Long, audioData: FloatArray, numFrames: Int): Int
+    external fun flushStream(handle: Long)
+    external fun pauseStream(handle: Long)
+    external fun startStream(handle: Long)
     external fun closeStream(handle: Long)
+    external fun getPlaybackPositionFrames(handle: Long): Long
+    external fun getPlaybackTimestampUs(handle: Long): Long
     external fun getSampleRate(handle: Long): Int
     external fun isExclusive(handle: Long): Boolean
 

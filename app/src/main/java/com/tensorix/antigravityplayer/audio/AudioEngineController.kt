@@ -34,4 +34,23 @@ object AudioEngineController {
     fun getBitPerfectState(): BitPerfectState {
         return _snapshot.value?.bitPerfect?.state ?: BitPerfectState.UNKNOWN
     }
+
+    /**
+     * Reconfigures audio engine for a route change event without destroying the Media3 player.
+     */
+    fun reconfigureForRouteChange(context: Context, newRoute: AudioRouteCapability?) {
+        invalidate()
+        val service = com.tensorix.antigravityplayer.player.PlaybackService.instance
+        service?.refreshAudiophileState()
+
+        val routeType = newRoute?.routeType
+        if (routeType == AudioOutputRouteType.WIRED_HEADSET ||
+            routeType == AudioOutputRouteType.WIRED_HEADPHONES ||
+            routeType == AudioOutputRouteType.USB_DAC ||
+            routeType == AudioOutputRouteType.USB_DEVICE
+        ) {
+            val appContext = context.applicationContext ?: context
+            AudioInitializationCoordinator.triggerOptionalVendorProbe(appContext)
+        }
+    }
 }

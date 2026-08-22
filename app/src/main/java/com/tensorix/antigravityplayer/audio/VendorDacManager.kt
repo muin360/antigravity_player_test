@@ -56,18 +56,23 @@ object VendorDacManager {
             SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "hifi_state", "on")
             SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "hifi_dac_enable", "1")
             SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "hifi_mode", "1")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "vivo_hifi", "1")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "vivo_headset_hifi", "1")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "vivo_app_package_name", context.packageName)
 
             // Safe Settings.System check
             return try {
                 if (Settings.System.canWrite(context)) {
-                    val current = Settings.System.getString(context.contentResolver, "vivo_hifi_music_app_list") ?: ""
+                    val cr = context.contentResolver
+                    val current = Settings.System.getString(cr, "vivo_hifi_music_app_list") ?: ""
                     if (!current.contains(context.packageName)) {
                         Settings.System.putString(
-                            context.contentResolver,
+                            cr,
                             "vivo_hifi_music_app_list",
                             if (current.isEmpty()) context.packageName else "$current,${context.packageName}"
                         )
                     }
+                    Settings.System.putInt(cr, "hifi_settings_music", 1)
                     true
                 } else false
             } catch (t: Throwable) {

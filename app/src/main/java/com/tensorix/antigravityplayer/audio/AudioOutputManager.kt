@@ -256,8 +256,9 @@ class AudioOutputManager(private val context: Context) {
 
         // Correlate with cached capabilities
         val activeRoute = activeDevice?.let { dev ->
-            val devName = dev.productName?.toString() ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) dev.address else null
-            routes.find { it.deviceName == (devName ?: it.routeType.displayName) }
+            val devRouteType = dev.toRouteType()
+            routes.find { it.routeType == devRouteType }
+                ?: routes.find { it.deviceName == (dev.productName?.toString() ?: it.routeType.displayName) }
         }
 
         // 2. Build Canonical Runtime Snapshot

@@ -201,6 +201,9 @@ class PlaybackService : MediaSessionService() {
     var usbAudioMasterEngine: com.tensorix.antigravityplayer.audio.UsbAudioMasterEngine? = null
         private set
 
+    var activeOboeAudioSink: com.tensorix.antigravityplayer.audio.OboeAudioSink? = null
+        private set
+
     val activeAudioSessionId: Int
         get() = player?.audioSessionId ?: 0
 
@@ -230,6 +233,15 @@ class PlaybackService : MediaSessionService() {
         equalizerEngine?.setDspProcessor(dspProcessor)
         autoEqEngine = com.tensorix.antigravityplayer.audio.AutoEqEngine(applicationContext)
 
+        // Generate persistent audio session ID to notify Android AudioPolicy / Vivo HiFi service
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            val generatedSessionId = audioManager.generateAudioSessionId()
+            if (generatedSessionId != 0) {
+                vivoAudioLayer?.onAudioSessionOpened(generatedSessionId)
+                universalVendorManager?.onAudioSessionActive(generatedSessionId)
+            }
+        }
+
         // Retain settings from preferences
         _hiFiEnabled.value = audioPrefs.getBoolean("hi_fi_enabled", true)
         _bitPerfectMode.value = audioPrefs.getBoolean("bit_perfect_mode", false)
@@ -247,9 +259,9 @@ class PlaybackService : MediaSessionService() {
         configJob = serviceScope.launch {
             launch {
                 outputConfigManager?.configUpdates?.collectLatest { updatedRoute ->
-                    val activeRoute = audioOutputManager?.scanOutputState()?.activeRoute?.routeType
-                    if (activeRoute == updatedRoute) {
-                        reloadAudioPipeline()
+                    val activeRoute = audioOutputManager?.scanOutputState()?.activeRoute
+                    if (activeRoute?.routeType == updatedRoute) {
+                        AudioEngineController.reconfigureForRouteChange(applicationContext, activeRoute)
                     }
                 }
             }
@@ -259,8 +271,8 @@ class PlaybackService : MediaSessionService() {
                     val newRoute = state.activeRoute?.routeType
                     if (newRoute != lastRoute) {
                         lastRoute = newRoute
-                        Log.i("AntigravityAudioAudit", "[AUTOMATION] Audio route changed to $newRoute. Rebuilding pipeline!")
-                        reloadAudioPipeline()
+                        Log.i("AntigravityAudioAudit", "[AUTOMATION] Audio route changed to $newRoute. Reconfiguring output without rebuilding player.")
+                        AudioEngineController.reconfigureForRouteChange(applicationContext, state.activeRoute)
                     }
                 }
             }
@@ -368,9 +380,6 @@ class PlaybackService : MediaSessionService() {
         val activeRouteType = audioOutputManager?.scanOutputState()?.activeRoute?.routeType ?: AudioOutputRouteType.SPEAKER
         val config = outputConfigManager?.getConfigForDevice(activeRouteType) ?: OutputDeviceConfig()
 
-        // 1. Asynchronously trigger vendor probe in background if needed
-        com.tensorix.antigravityplayer.audio.AudioInitializationCoordinator.triggerOptionalVendorProbe(applicationContext)
-
         val audioAttributes = AudioAttributes.Builder()
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .setUsage(C.USAGE_MEDIA)
@@ -401,7 +410,7 @@ class PlaybackService : MediaSessionService() {
                     if (com.tensorix.antigravityplayer.audio.OboeBridge.isAvailable) {
                         try {
                             Log.i("AntigravityAudioAudit", "Using OboeAudioSink for High-Performance path (Bit-Perfect: $isBitPerfect)")
-                            return com.tensorix.antigravityplayer.audio.OboeAudioSink(
+                            val sink = com.tensorix.antigravityplayer.audio.OboeAudioSink(
                                 context = context,
                                 dspProcessor = dspProcessor,
                                 bitPerfectMode = isBitPerfect,
@@ -412,6 +421,8 @@ class PlaybackService : MediaSessionService() {
                                     handleAudioOutputChanged(true)
                                 }
                             )
+                            activeOboeAudioSink = sink
+                            return sink
                         } catch (e: Exception) {
                             Log.e("AntigravityAudioAudit", "OboeAudioSink initialization failed, falling back to Default: ${e.message}")
                         }
@@ -741,7 +752,9 @@ class PlaybackService : MediaSessionService() {
     fun setHiFiEnabled(enabled: Boolean) {
         _hiFiEnabled.value = enabled && isHiFiSupported()
         audioPrefs.edit { putBoolean("hi_fi_enabled", _hiFiEnabled.value) }
-        reloadAudioPipeline()
+        dspProcessor.isTurboMode = _hiFiEnabled.value
+        AudioEngineController.invalidate()
+        refreshAudiophileState()
     }
 
     fun setBitPerfectMode(enabled: Boolean) {
@@ -766,22 +779,24 @@ class PlaybackService : MediaSessionService() {
             dspProcessor.harmonicExciterLevel = 0.0
         }
         equalizerEngine?.setBitPerfectBypass(enabled)
+        activeOboeAudioSink?.setBitPerfectMode(enabled)
         AudioEngineController.invalidate()
-        reloadAudioPipeline()
+        refreshAudiophileState()
     }
 
     fun setSampleRateMatching(enabled: Boolean) {
         _sampleRateMatching.value = enabled
         audioPrefs.edit().putBoolean("sample_rate_matching", enabled).apply()
         Log.i("HiFiPlayer", "Sample Rate Matching changed: $enabled")
-        reloadAudioPipeline()
+        AudioEngineController.invalidate()
+        refreshAudiophileState()
     }
 
     fun setAudioAuxEnabled(enabled: Boolean) {
         _audioAuxEnabled.value = enabled
         audioPrefs.edit().putBoolean("audio_aux_enabled", enabled).apply()
-        // If enabled, force specific attributes for low latency
-        reloadAudioPipeline()
+        AudioEngineController.invalidate()
+        refreshAudiophileState()
     }
 
     fun setAutoProfileSwitch(enabled: Boolean) {
