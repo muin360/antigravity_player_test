@@ -460,7 +460,6 @@ fun MainAppScreen(
                     isSampleRateMatching = isSampleRateMatching,
                     isAudioAuxEnabled = isAudioAuxEnabled,
                     hifiProfileManager = PlaybackService.instance?.hifiProfileManager,
-                    audioIntelligence = PlaybackService.instance?.audioIntelligence,
                     selectedAiProvider = selectedAiProvider,
                     selectedAiModel = selectedAiModel,
                     audioSnapshot = audioSnapshot,

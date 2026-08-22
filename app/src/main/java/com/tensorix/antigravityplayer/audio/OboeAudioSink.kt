@@ -299,12 +299,10 @@ class OboeAudioSink(
 
         // Error code returned by Oboe
         val errorCode = framesWrittenResult
-        Log.e(TAG_LOG, "Oboe write failed with error code: $errorCode. Recovering stream.")
+        Log.e(TAG_LOG, "Oboe write failed with error code: $errorCode. Delegating recovery to AudioEngine.")
         closeOboeStream()
 
-        PlaybackService.instance?.let { service ->
-            service.audioOutputManager?.forceRefresh()
-        }
+        AudioEngine.handleStreamError(errorCode, context)
 
         return false
     }

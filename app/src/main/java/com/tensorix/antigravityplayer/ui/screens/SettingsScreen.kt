@@ -24,7 +24,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.util.UnstableApi
 import com.tensorix.antigravityplayer.ai.AiProvider
-import com.tensorix.antigravityplayer.audio.AudioIntelligencePlatform
 import com.tensorix.antigravityplayer.audio.AudiophilePlaybackSnapshot
 import com.tensorix.antigravityplayer.audio.BitPerfectState
 import com.tensorix.antigravityplayer.audio.HiFiProfileManager
@@ -48,7 +47,6 @@ fun SettingsScreen(
     isSampleRateMatching: Boolean,
     isAudioAuxEnabled: Boolean,
     hifiProfileManager: HiFiProfileManager?,
-    audioIntelligence: AudioIntelligencePlatform?,
     selectedAiProvider: AiProvider,
     selectedAiModel: String,
     audioSnapshot: AudiophilePlaybackSnapshot,
@@ -83,12 +81,6 @@ fun SettingsScreen(
     
     val activeProfile by if (hifiProfileManager != null) {
         hifiProfileManager.activeProfile.collectAsState()
-    } else {
-        remember { mutableStateOf(null) }
-    }
-    
-    val healthReport by if (audioIntelligence != null) {
-        audioIntelligence.healthScore.collectAsState()
     } else {
         remember { mutableStateOf(null) }
     }
@@ -177,16 +169,6 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.5.sp, fontWeight = FontWeight.Bold),
                 color = PrimaryCyan
             )
-            healthReport?.let { report ->
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (report.score >= 90) Color(0xFF00E676).copy(alpha = 0.2f) else SecondaryViolet.copy(alpha = 0.2f))
-                        .padding(horizontal = 8.dp, vertical = 3.dp)
-                ) {
-                    Text("HEALTH: ${report.score}/100", color = if (report.score >= 90) Color(0xFF00E676) else SecondaryViolet, fontSize = 10.sp, fontWeight = FontWeight.Black)
-                }
-            }
         }
         Spacer(modifier = Modifier.height(8.dp))
 

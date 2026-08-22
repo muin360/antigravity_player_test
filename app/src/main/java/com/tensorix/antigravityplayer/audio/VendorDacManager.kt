@@ -244,6 +244,44 @@ object VendorDacManager {
         LGAdapter.deactivate(context)
     }
 
+    fun onAudioSessionOpened(context: Context, sessionId: Int) {
+        if (sessionId == 0) return
+        val pkg = context.packageName
+        
+        val standardIntent = android.content.Intent(android.media.audiofx.AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
+            putExtra(android.media.audiofx.AudioEffect.EXTRA_AUDIO_SESSION, sessionId)
+            putExtra(android.media.audiofx.AudioEffect.EXTRA_PACKAGE_NAME, pkg)
+            putExtra(android.media.audiofx.AudioEffect.EXTRA_CONTENT_TYPE, android.media.audiofx.AudioEffect.CONTENT_TYPE_MUSIC)
+        }
+        runCatching { context.sendBroadcast(standardIntent) }
+
+        if (SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.VIVO)) {
+            val bbkIntent = android.content.Intent("bbk.media.action.OPEN_AUDIOFX_CONTROL_SESSION").apply {
+                putExtra("android.media.extra.AUDIO_SESSION", sessionId)
+                putExtra("android.media.extra.PACKAGE_NAME", pkg)
+            }
+            runCatching { context.sendBroadcast(bbkIntent) }
+        }
+    }
+
+    fun onAudioSessionClosed(context: Context, sessionId: Int) {
+        if (sessionId == 0) return
+        val pkg = context.packageName
+        val standardIntent = android.content.Intent(android.media.audiofx.AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION).apply {
+            putExtra(android.media.audiofx.AudioEffect.EXTRA_AUDIO_SESSION, sessionId)
+            putExtra(android.media.audiofx.AudioEffect.EXTRA_PACKAGE_NAME, pkg)
+        }
+        runCatching { context.sendBroadcast(standardIntent) }
+
+        if (SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.VIVO)) {
+            val bbkIntent = android.content.Intent("bbk.media.action.CLOSE_AUDIOFX_CONTROL_SESSION").apply {
+                putExtra("android.media.extra.AUDIO_SESSION", sessionId)
+                putExtra("android.media.extra.PACKAGE_NAME", pkg)
+            }
+            runCatching { context.sendBroadcast(bbkIntent) }
+        }
+    }
+
     fun getDirectBufferSize(sampleRate: Int, channelCount: Int, bytesPerSample: Int): Int {
         return try {
             val minBufferSize = AudioTrack.getMinBufferSize(

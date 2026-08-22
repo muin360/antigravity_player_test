@@ -1,19 +1,14 @@
 package com.tensorix.antigravityplayer.player
 
-import android.bluetooth.BluetoothA2dp
-import android.bluetooth.BluetoothProfile
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.media.AudioManager
-import android.media.audiofx.AudioEffect
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.edit
-import com.tensorix.antigravityplayer.audio.HiFiActivationResult
-import com.tensorix.antigravityplayer.audio.HiFiStateManager
 import com.tensorix.antigravityplayer.audio.HiFiBadgeState
 import com.tensorix.antigravityplayer.audio.HardwareHiFiVerifier
 import androidx.media3.common.AudioAttributes
@@ -27,6 +22,7 @@ import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.tensorix.antigravityplayer.audio.AudioEngine
 import com.tensorix.antigravityplayer.audio.AudioEngineController
 import com.tensorix.antigravityplayer.audio.AudioOutputApi
 import com.tensorix.antigravityplayer.audio.AudioOutputConfigManager
@@ -54,8 +50,7 @@ import kotlinx.coroutines.flow.asStateFlow
  *  - 24-bit / 32-bit Float Output direct passthrough (FLAC, WAV, ALAC, DSD)
  *  - Dynamic Hardware Sample Rate Matching (44.1kHz, 48kHz, 88.2kHz, 96kHz, 176.4kHz, 192kHz)
  *  - Bit-Perfect DSP Bypass switch for studio-master audio clarity
- *  - Integrated AudioOutputManager for USB DAC detection, hotplug routing, and AudioFlinger diagnostics
- *  - Hardened for Vivo Hi-Fi DAC auto-activation and system DSP suppression
+ *  - Authoritative AudioEngine owning stream lifecycle and non-destructive route changes
  */
 @UnstableApi
 class PlaybackService : MediaSessionService() {
@@ -72,8 +67,6 @@ class PlaybackService : MediaSessionService() {
     var hifiProfileManager: com.tensorix.antigravityplayer.audio.HiFiProfileManager? = null
         private set
     var dynamicProfileEngine: com.tensorix.antigravityplayer.audio.DynamicProfileEngine? = null
-        private set
-    var audioIntelligence: com.tensorix.antigravityplayer.audio.AudioIntelligencePlatform? = null
         private set
     var autoEqEngine: com.tensorix.antigravityplayer.audio.AutoEqEngine? = null
         private set
@@ -102,69 +95,9 @@ class PlaybackService : MediaSessionService() {
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
-    private var configJob: Job? = null
     private var volumeReceiver: BroadcastReceiver? = null
     private var bitPerfectReceiver: BroadcastReceiver? = null
-
-    private val headsetReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            when (intent.action) {
-                Intent.ACTION_HEADSET_PLUG -> {
-                    val state = intent.getIntExtra("state", -1)
-                    handleAudioOutputChanged(state == 1)
-                }
-                AudioManager.ACTION_AUDIO_BECOMING_NOISY -> {
-                    player?.pause()
-                    handleAudioOutputChanged(false)
-                }
-                BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED -> {
-                    val state = intent.getIntExtra(BluetoothProfile.EXTRA_STATE, BluetoothProfile.STATE_DISCONNECTED)
-                    handleAudioOutputChanged(state == BluetoothProfile.STATE_CONNECTED)
-                }
-                AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED -> {
-                    val state = intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, AudioManager.SCO_AUDIO_STATE_DISCONNECTED)
-                    handleAudioOutputChanged(state == AudioManager.SCO_AUDIO_STATE_CONNECTED)
-                }
-            }
-        }
-    }
-
-    private fun handleAudioOutputChanged(externalOutputConnected: Boolean) {
-        // Re-evaluate actual audio output state
-        HiFiStateManager.evaluate(applicationContext)
-        val hifiState = HiFiStateManager.state.value
-        
-        Log.d("HiFi", "Output changed → type=${hifiState.outputType}, hifi=${hifiState.isHiFiActive}, sr=${hifiState.sampleRate}")
-        
-        refreshAudiophileState()
-        
-        // Also update ExoPlayer pipeline enable/disable
-        val shouldEnablePipeline = hifiState.isHiFiActive
-        if (_hiFiEnabled.value != shouldEnablePipeline) {
-            _hiFiEnabled.value = shouldEnablePipeline
-            audioPrefs.edit { putBoolean("hi_fi_enabled", shouldEnablePipeline) }
-            reloadAudioPipeline()
-        }
-    }
-
-    private fun registerAudioOutputReceiver() {
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_HEADSET_PLUG)
-            addAction(AudioManager.ACTION_HEADSET_PLUG)
-            addAction(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
-            addAction(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED)
-            addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(headsetReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(headsetReceiver, filter)
-        }
-    }
-
-    private fun unregisterAudioOutputReceiver() {
-        runCatching { unregisterReceiver(headsetReceiver) }
-    }
+    private var becomingNoisyReceiver: BroadcastReceiver? = null
 
     private val _hiFiEnabled = MutableStateFlow(true)
     val hiFiEnabled: StateFlow<Boolean> = _hiFiEnabled.asStateFlow()
@@ -190,17 +123,6 @@ class PlaybackService : MediaSessionService() {
     private val _audiophileSnapshot = MutableStateFlow(AudiophilePlaybackSnapshot())
     val audiophileSnapshot: StateFlow<AudiophilePlaybackSnapshot> = _audiophileSnapshot.asStateFlow()
 
-    var vivoAudioLayer: com.tensorix.antigravityplayer.audio.VivoAudioIntegrationLayer? = null
-        private set
-    var universalHardwareDetector: com.tensorix.antigravityplayer.audio.UniversalHardwareDetector? = null
-        private set
-    var universalHiFiEngine: com.tensorix.antigravityplayer.audio.UniversalHiFiEngine? = null
-        private set
-    var universalVendorManager: com.tensorix.antigravityplayer.audio.UniversalVendorIntegrationLayer? = null
-        private set
-    var usbAudioMasterEngine: com.tensorix.antigravityplayer.audio.UsbAudioMasterEngine? = null
-        private set
-
     var activeOboeAudioSink: com.tensorix.antigravityplayer.audio.OboeAudioSink? = null
         private set
 
@@ -214,13 +136,7 @@ class PlaybackService : MediaSessionService() {
         instance = this
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-        Log.i("HiFiPlayer", "PlaybackService onCreate: Activating Hardware Paths")
-        universalHardwareDetector = com.tensorix.antigravityplayer.audio.UniversalHardwareDetector(applicationContext)
-        universalHiFiEngine = com.tensorix.antigravityplayer.audio.UniversalHiFiEngine(applicationContext)
-        universalVendorManager = com.tensorix.antigravityplayer.audio.UniversalVendorIntegrationLayer(applicationContext)
-        usbAudioMasterEngine = com.tensorix.antigravityplayer.audio.UsbAudioMasterEngine(applicationContext)
-
-        vivoAudioLayer = com.tensorix.antigravityplayer.audio.VivoAudioIntegrationLayer(applicationContext)
+        Log.i("HiFiPlayer", "PlaybackService onCreate: Engaging Authoritative AudioEngine")
         audioOutputManager = AudioOutputManager(applicationContext)
         outputConfigManager = AudioOutputConfigManager.getInstance(applicationContext)
         hifiProfileManager = com.tensorix.antigravityplayer.audio.HiFiProfileManager(applicationContext)
@@ -228,17 +144,15 @@ class PlaybackService : MediaSessionService() {
         if (profileManager != null) {
             dynamicProfileEngine = com.tensorix.antigravityplayer.audio.DynamicProfileEngine(applicationContext, profileManager)
         }
-        audioIntelligence = com.tensorix.antigravityplayer.audio.AudioIntelligencePlatform(applicationContext)
         equalizerEngine = EqualizerEngine(applicationContext)
         equalizerEngine?.setDspProcessor(dspProcessor)
         autoEqEngine = com.tensorix.antigravityplayer.audio.AutoEqEngine(applicationContext)
 
-        // Generate persistent audio session ID to notify Android AudioPolicy / Vivo HiFi service
+        // Generate persistent audio session ID to notify Android AudioPolicy / OEM Hi-Fi service
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             val generatedSessionId = audioManager.generateAudioSessionId()
             if (generatedSessionId != 0) {
-                vivoAudioLayer?.onAudioSessionOpened(generatedSessionId)
-                universalVendorManager?.onAudioSessionActive(generatedSessionId)
+                VendorDacManager.onAudioSessionOpened(applicationContext, generatedSessionId)
             }
         }
 
@@ -256,30 +170,6 @@ class PlaybackService : MediaSessionService() {
         equalizerEngine?.setBitPerfectBypass(_bitPerfectMode.value)
         refreshAudiophileState()
 
-        configJob = serviceScope.launch {
-            launch {
-                outputConfigManager?.configUpdates?.collectLatest { updatedRoute ->
-                    val activeRoute = audioOutputManager?.scanOutputState()?.activeRoute
-                    if (activeRoute?.routeType == updatedRoute) {
-                        AudioEngineController.reconfigureForRouteChange(applicationContext, activeRoute)
-                    }
-                }
-            }
-            launch {
-                var lastRoute = audioOutputManager?.scanOutputState()?.activeRoute?.routeType
-                audioOutputManager?.outputState?.collectLatest { state ->
-                    val newRoute = state.activeRoute?.routeType
-                    if (newRoute != lastRoute) {
-                        lastRoute = newRoute
-                        Log.i("AntigravityAudioAudit", "[AUTOMATION] Audio route changed to $newRoute. Reconfiguring output without rebuilding player.")
-                        AudioEngineController.reconfigureForRouteChange(applicationContext, state.activeRoute)
-                    }
-                }
-            }
-        }
-        
-        // Broadcast receivers are now consolidated into headsetReceiver registered via registerAudioOutputReceiver()
-
         val bitPerfectFilter = IntentFilter("com.tensorix.antigravityplayer.SET_BIT_PERFECT")
         bitPerfectReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
@@ -293,6 +183,22 @@ class PlaybackService : MediaSessionService() {
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(bitPerfectReceiver, bitPerfectFilter)
+        }
+
+        // Becoming Noisy receiver for immediate pause on unplug
+        becomingNoisyReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                    player?.pause()
+                }
+            }
+        }
+        val noisyFilter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(becomingNoisyReceiver, noisyFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(becomingNoisyReceiver, noisyFilter)
         }
 
         // Listen to volume changes for DVC using BroadcastReceiver
@@ -315,18 +221,14 @@ class PlaybackService : MediaSessionService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(volumeReceiver, volFilter, Context.RECEIVER_NOT_EXPORTED)
         } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(volumeReceiver, volFilter)
         }
         
-        // Initial sync
+        // Initial volume sync
         val initDvc = (audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toDouble() / 
                 audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toDouble().coerceAtLeast(1.0)).coerceIn(0.0, 1.0)
         dspProcessor.dvcVolume = initDvc
-        val initialHandle = com.tensorix.antigravityplayer.audio.OboeAudioSink.currentActiveHandle
-        if (initialHandle != 0L && com.tensorix.antigravityplayer.audio.OboeBridge.isAvailable) {
-            com.tensorix.antigravityplayer.audio.OboeBridge.setDvcVolume(initialHandle, initDvc)
-        }
-
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = android.app.NotificationChannel(
@@ -343,9 +245,7 @@ class PlaybackService : MediaSessionService() {
 
         buildAndAttachPlayer()
         showPlaybackNotification("Antigravity Player ready", "Preparing audio pipeline")
-
         refreshAudiophileState()
-        registerAudioOutputReceiver()
     }
 
     internal fun reloadAudioPipeline() {
@@ -385,13 +285,11 @@ class PlaybackService : MediaSessionService() {
             .setUsage(C.USAGE_MEDIA)
             .apply {
                 if (_hiFiEnabled.value) {
-                    // FLAG_LOW_LATENCY (0x100) is the correct Java framework flag that encourages
-                    // AudioPolicyManager to select a lower-latency, potentially direct output.
                     @Suppress("WrongConstant")
                     setFlags(0x100)
                 }
             }
-            .setAllowedCapturePolicy(C.ALLOW_CAPTURE_BY_NONE) // Direct hardware path
+            .setAllowedCapturePolicy(C.ALLOW_CAPTURE_BY_NONE)
             .build()
 
         // Poweramp-Grade 32-bit Float AudioSink with 64-bit Double DSP Processing
@@ -413,13 +311,7 @@ class PlaybackService : MediaSessionService() {
                             val sink = com.tensorix.antigravityplayer.audio.OboeAudioSink(
                                 context = context,
                                 dspProcessor = dspProcessor,
-                                bitPerfectMode = isBitPerfect,
-                                onExclusiveModeChanged = { exclusive ->
-                                    _oboeMode.value = if (exclusive) "EXCLUSIVE" else "SHARED"
-                                    Log.i("AntigravityAudioAudit", "Oboe Mode: ${_oboeMode.value}")
-                                    // Handle via re-evaluation
-                                    handleAudioOutputChanged(true)
-                                }
+                                bitPerfectMode = isBitPerfect
                             )
                             activeOboeAudioSink = sink
                             return sink
@@ -442,14 +334,12 @@ class PlaybackService : MediaSessionService() {
                     val builder = DefaultAudioSink.Builder(context)
                         .setAudioProcessors(if (isBitPerfect) emptyArray() else arrayOf(dspProcessor))
                     
-                    // Float output শুধু DSP mode-এ চালু। Direct HAL-এ Integer PCM দরকার।
                     if (!isBitPerfect && isHiFiSupported()) {
                         builder.setEnableFloatOutput(true)
                     } else {
                         builder.setEnableFloatOutput(false)
                     }
 
-                    // Apply Buffer Multiplier & Alignment
                     val bufferProvider = object : DefaultAudioSink.AudioTrackBufferSizeProvider {
                         override fun getBufferSizeInBytes(
                             minBufferSizeInBytes: Int,
@@ -476,7 +366,6 @@ class PlaybackService : MediaSessionService() {
                         .setEnableAudioTrackPlaybackParams(true)
                         .build()
                     
-                    // Hardware DSP Offload must be disabled when using 64-bit Float AudioProcessor
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         sink.setOffloadMode(AudioSink.OFFLOAD_MODE_DISABLED)
                     }
@@ -507,39 +396,17 @@ class PlaybackService : MediaSessionService() {
             .setSeekParameters(androidx.media3.exoplayer.SeekParameters.EXACT)
             .build()
 
-        // Bit-perfect mode active থাকলে Direct HAL-এর জন্য hardware prepare করো
         if (_bitPerfectMode.value) {
             val sampleRate = _currentTrackInfo.value.sampleRateHz
             VendorDacManager.prepareHardwareForDirectPlayback(this, sampleRate)
         }
 
-        // experimentalSetDynamicSchedulingEnabled & experimentalSetOffloadSchedulingEnabled 
-        // are not available in Media3 1.3.1; omitting to maintain build stability.
-        
-        exoPlayer.addAudioOffloadListener(
-            object : androidx.media3.exoplayer.ExoPlayer.AudioOffloadListener {
-                override fun onOffloadedPlayback(isOffloadedPlayback: Boolean) {
-                    Log.i("HiFiPlayer", "Audio Offload Active: $isOffloadedPlayback")
-                }
-            }
-        )
-
         val currentSessionId = exoPlayer.audioSessionId
         if (currentSessionId != 0) {
+            VendorDacManager.onAudioSessionOpened(applicationContext, currentSessionId)
             if (!_bitPerfectMode.value) {
-                // DSP mode: AudioEffect session register করো, Vivo Hi-Fi trigger করার জন্য
-                serviceScope.launch {
-                    delay(300)
-                    val intent = Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
-                        putExtra(AudioEffect.EXTRA_AUDIO_SESSION, currentSessionId)
-                        putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
-                        putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
-                    }
-                    runCatching { sendBroadcast(intent) }
-                }
                 equalizerEngine?.attachToAudioSession(currentSessionId)
             } else {
-                // Bit-perfect mode: AudioEffect release করো যাতে AudioPolicy hook না করে
                 equalizerEngine?.release()
             }
             logRuntimeAudioDiagnostics(currentSessionId, audioAttributes)
@@ -548,18 +415,8 @@ class PlaybackService : MediaSessionService() {
         exoPlayer.addListener(object : Player.Listener {
             override fun onAudioSessionIdChanged(audioSessionId: Int) {
                 if (audioSessionId != 0) {
-                    vivoAudioLayer?.onAudioSessionOpened(audioSessionId)
-                    universalVendorManager?.onAudioSessionActive(audioSessionId)
+                    VendorDacManager.onAudioSessionOpened(applicationContext, audioSessionId)
                     if (!_bitPerfectMode.value) {
-                        serviceScope.launch {
-                            delay(300)
-                            val intent = Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
-                                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, audioSessionId)
-                                putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
-                                putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
-                            }
-                            runCatching { sendBroadcast(intent) }
-                        }
                         equalizerEngine?.attachToAudioSession(audioSessionId)
                     } else {
                         equalizerEngine?.release()
@@ -587,11 +444,10 @@ class PlaybackService : MediaSessionService() {
     private fun logRuntimeAudioDiagnostics(sessionId: Int, attributes: AudioAttributes) {
         val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         val currentTrack = _currentTrackInfo.value
-        val trackSampleRate = currentTrack?.sampleRateHz ?: 48000
-        val trackBitDepth = currentTrack?.bitDepth ?: 16
-        val trackChannels = currentTrack?.channels ?: 2
+        val trackSampleRate = currentTrack.sampleRateHz.takeIf { it > 0 } ?: 48000
+        val trackBitDepth = currentTrack.bitDepth.takeIf { it > 0 } ?: 16
+        val trackChannels = currentTrack.channels.takeIf { it > 0 } ?: 2
 
-        val flags = attributes.flags
         val actualSampleRate = audioManager?.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toIntOrNull() ?: trackSampleRate
         val actualEncoding = if (!_bitPerfectMode.value && isHiFiSupported()) "ENCODING_PCM_FLOAT (4)" else "ENCODING_PCM_16BIT (2)"
         val actualChannels = if (trackChannels == 1) "MONO (1)" else "STEREO (2)"
@@ -601,28 +457,6 @@ class PlaybackService : MediaSessionService() {
             trackSampleRate = trackSampleRate,
             trackBitDepth = trackBitDepth,
             isDspBypassed = _bitPerfectMode.value
-        )
-
-        val isHeadset = vivoAudioLayer?.isWiredHeadsetConnected?.value 
-            ?: (universalHardwareDetector?.detectActiveOutputDevice()?.isWired == true)
-        val isUsb = audioOutputManager?.scanOutputState()?.activeRoute?.routeType == AudioOutputRouteType.USB_DAC
-        val capabilityReport = com.tensorix.antigravityplayer.audio.VivoHiFiStateEngine.evaluateState(
-            context = applicationContext,
-            isWiredHeadset = isHeadset,
-            isUsbDac = isUsb,
-            isPlaying = player?.isPlaying == true || player?.playWhenReady == true,
-            audioSessionId = sessionId,
-            sampleRate = trackSampleRate,
-            isFloatOutput = !_bitPerfectMode.value && isHiFiSupported(),
-            isDspBypassed = _bitPerfectMode.value
-        )
-
-        val universalEvaluation = universalHiFiEngine?.evaluate(
-            isPlaying = player?.isPlaying == true || player?.playWhenReady == true,
-            audioSessionId = sessionId,
-            isBitPerfectRequested = _bitPerfectMode.value,
-            trackSampleRate = trackSampleRate,
-            trackBitDepth = trackBitDepth
         )
 
         val isBitPerfect = _bitPerfectMode.value
@@ -643,14 +477,7 @@ class PlaybackService : MediaSessionService() {
         Log.i("AntigravityAudioAudit", "8.  Output Sample Rate:            $actualSampleRate Hz")
         Log.i("AntigravityAudioAudit", "9.  Actual Channel Count:          $actualChannels")
         Log.i("AntigravityAudioAudit", "10. Active AudioFlinger Thread:    ${verifiedReport.audioThreadType.displayName}")
-        Log.i("AntigravityAudioAudit", "11. Universal Hi-Fi State:         ${universalEvaluation?.state?.title ?: "N/A"}")
-        Log.i("AntigravityAudioAudit", "12. Universal Hardware DAC:        ${universalEvaluation?.activeDac?.dacModelName ?: "N/A"}")
-        Log.i("AntigravityAudioAudit", "13. Active Endpoint:               ${universalEvaluation?.activeDevice?.displayName ?: "N/A"}")
         Log.i("AntigravityAudioAudit", "==========================================================================")
-        if (universalEvaluation != null) {
-            Log.i("AntigravityAudioAudit", universalEvaluation.troubleshootingSummary)
-        }
-        Log.i("AntigravityAudioAudit", capabilityReport.troubleshootingReport)
     }
 
     private fun buildAndAttachPlayer() {
@@ -686,7 +513,7 @@ class PlaybackService : MediaSessionService() {
         peakAmplitude: Float = 0f,
         useAlbumGain: Boolean = false
     ) {
-        val resolvedSampleRate = if (sampleRateHz > 0) sampleRateHz else 0 // 0 means unknown
+        val resolvedSampleRate = if (sampleRateHz > 0) sampleRateHz else 0
         val resolvedBitDepth = if (bitDepth > 0) bitDepth else 0
         val isHiResSource = (resolvedBitDepth >= 24) || (resolvedSampleRate >= 88200)
         val cleanCodec = codec.ifBlank { "Unknown Codec" }
@@ -720,7 +547,7 @@ class PlaybackService : MediaSessionService() {
 
         snapshot.output.canonicalSnapshot?.let { canon ->
             HiFiBadgeState.updateFromSnapshot(canon)
-            AudioEngineController.updateSnapshot(applicationContext, trackInfo, isDspActive)
+            AudioEngine.updateSnapshot(applicationContext, trackInfo, isDspActive)
         }
         
         // Auto-switch profile and Listening Mode based on dynamic route engine
@@ -730,7 +557,6 @@ class PlaybackService : MediaSessionService() {
             if (profile != null) {
                 equalizerEngine?.applyHiFiProfile(profile)
                 
-                // Auto-configure optimal listening mode for route
                 when (activeRoute) {
                     AudioOutputRouteType.USB_DAC, AudioOutputRouteType.USB_DEVICE -> {
                         equalizerEngine?.setListeningMode(com.tensorix.antigravityplayer.audio.ListeningMode.REFERENCE)
@@ -753,7 +579,7 @@ class PlaybackService : MediaSessionService() {
         _hiFiEnabled.value = enabled && isHiFiSupported()
         audioPrefs.edit { putBoolean("hi_fi_enabled", _hiFiEnabled.value) }
         dspProcessor.isTurboMode = _hiFiEnabled.value
-        AudioEngineController.invalidate()
+        AudioEngine.invalidate()
         refreshAudiophileState()
     }
 
@@ -780,7 +606,7 @@ class PlaybackService : MediaSessionService() {
         }
         equalizerEngine?.setBitPerfectBypass(enabled)
         activeOboeAudioSink?.setBitPerfectMode(enabled)
-        AudioEngineController.invalidate()
+        AudioEngine.setBitPerfectMode(enabled)
         refreshAudiophileState()
     }
 
@@ -788,14 +614,14 @@ class PlaybackService : MediaSessionService() {
         _sampleRateMatching.value = enabled
         audioPrefs.edit().putBoolean("sample_rate_matching", enabled).apply()
         Log.i("HiFiPlayer", "Sample Rate Matching changed: $enabled")
-        AudioEngineController.invalidate()
+        AudioEngine.invalidate()
         refreshAudiophileState()
     }
 
     fun setAudioAuxEnabled(enabled: Boolean) {
         _audioAuxEnabled.value = enabled
         audioPrefs.edit().putBoolean("audio_aux_enabled", enabled).apply()
-        AudioEngineController.invalidate()
+        AudioEngine.invalidate()
         refreshAudiophileState()
     }
 
@@ -818,18 +644,8 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
-    private val becomingNoisyReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
-                player?.pause()
-            }
-        }
-    }
-
     override fun onDestroy() {
-        unregisterAudioOutputReceiver()
-        HiFiStateManager.reset()
-        configJob?.cancel()
+        becomingNoisyReceiver?.let { runCatching { unregisterReceiver(it) } }
         serviceScope.coroutineContext[Job]?.cancel()
 
         bitPerfectReceiver?.let { runCatching { unregisterReceiver(it) } }
@@ -846,8 +662,6 @@ class PlaybackService : MediaSessionService() {
         
         equalizerEngine?.release()
         equalizerEngine = null
-        vivoAudioLayer?.unregister()
-        vivoAudioLayer = null
         audioOutputManager?.release()
         audioOutputManager = null
         instance = null
@@ -858,6 +672,7 @@ class PlaybackService : MediaSessionService() {
             mediaSession = null
         }
         player = null
+        AudioEngine.invalidate()
         super.onDestroy()
     }
 }

@@ -2,7 +2,6 @@ package com.tensorix.antigravityplayer.ui.screens
 
 import com.tensorix.antigravityplayer.audio.VendorDacManager
 import com.tensorix.antigravityplayer.audio.HardwareHiFiVerifier
-import com.tensorix.antigravityplayer.audio.AudioCapabilityManager
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -205,37 +204,40 @@ fun AudiophileInfoScreen(
         // UNIVERSAL HI-FI HARDWARE & 3-MODE STUDIO LISTENING SELECTOR
         val eqEngine = PlaybackService.instance?.equalizerEngine
         val currentMode = eqEngine?.listeningMode?.collectAsState()?.value ?: com.tensorix.antigravityplayer.audio.ListeningMode.AUDIOPHILE
-        val universalEngine = PlaybackService.instance?.universalHiFiEngine
-        val universalReport = remember(snapshot, isBitPerfectMode) {
-            universalEngine?.evaluate(
-                isPlaying = true,
-                audioSessionId = PlaybackService.instance?.activeAudioSessionId ?: 0,
-                isBitPerfectRequested = isBitPerfectMode,
-                trackSampleRate = track.sampleRateHz,
-                trackBitDepth = track.bitDepth
-            )
+        val canon = snapshot.output.canonicalSnapshot
+        val dacName = canon?.dac?.modelName?.value?.takeIf { it.isNotBlank() && !it.contains("Unknown") }
+            ?: output.activeRoute?.productName ?: output.activeRoute?.deviceName ?: "Hardware Audio DAC"
+        val stateTitle = if (output.bitPerfectState == BitPerfectState.VERIFIED) "BIT-PERFECT"
+            else if (output.bitPerfectState == BitPerfectState.ACTIVE_UNVERIFIED) "DIRECT"
+            else if (canon?.directPathActive?.value == true) "HI-FI ACTIVE"
+            else "ACTIVE"
+        val badgeColor = when (output.bitPerfectState) {
+            BitPerfectState.VERIFIED -> Color(0xFFFFD700)
+            BitPerfectState.ACTIVE_UNVERIFIED -> Color(0xFFD500F9)
+            BitPerfectState.REQUESTED -> Color(0xFF00B0FF)
+            else -> Color(0xFF00E5FF)
         }
 
         Card(
             colors = CardDefaults.cardColors(containerColor = CardBackground.copy(alpha = 0.85f)),
             shape = RoundedCornerShape(16.dp),
-            modifier = Modifier.fillMaxWidth().border(1.dp, Color(universalReport?.state?.badgeColorHex ?: 0xFF00E5FF).copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+            modifier = Modifier.fillMaxWidth().border(1.dp, badgeColor.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column {
                         Text("UNIVERSAL HI-FI HARDWARE ENGINE", color = PrimaryCyan, fontWeight = FontWeight.Bold, fontSize = 12.sp, letterSpacing = 1.sp)
-                        Text(universalReport?.activeDac?.dacModelName ?: "Hardware DAC", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text(dacName, color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                     }
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color(universalReport?.state?.badgeColorHex ?: 0xFF00E5FF).copy(alpha = 0.2f))
+                            .background(badgeColor.copy(alpha = 0.2f))
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            text = universalReport?.state?.title ?: "ACTIVE",
-                            color = Color(universalReport?.state?.badgeColorHex ?: 0xFF00E5FF),
+                            text = stateTitle,
+                            color = badgeColor,
                             fontWeight = FontWeight.Black,
                             fontSize = 11.sp
                         )

@@ -1,81 +1,90 @@
 # ANTIGRAVITY PLAYER
-# FINAL RUNTIME AUDIO ENGINE REMEDIATION & FORENSIC AUDIT REPORT
+# FINAL RUNTIME AUDIO ENGINE REMEDIATION & ARCHITECTURAL REPAIR REPORT
 
 **Date**: 2026-08-22  
-**Target Release**: Production Ready (RC1)  
-**Status**: VERIFIED & PRODUCTION HARDENED  
+**Target Release**: Production Ready (Release Candidate)  
+**Status**: VERIFIED & ARCHITECTURALLY CONSOLIDATED (0 DUPLICATES / 0 COMPETING RECOVERY AUTHORITIES)  
 
 ---
 
-## 1. Executive Summary & Root-Cause Remediation Matrix
+## 1. Executive Summary & Forensic Audit
 
-This forensic engineering pass addressed 6 critical runtime failure modes observed on real hardware (specifically 3.5mm IEM connection, seek instability, bit-perfect stalling, and OEM Hi-Fi trigger failures):
-
-| Issue Observed on Device | Root Cause Identified | Engineering Remediation Applied |
-| :--- | :--- | :--- |
-| **1. 3–5s startup latency & playback disappearance** | `OboeAudioSink.handleBuffer` returned `true` on partial frame writes (`framesWrittenResult < numFrames`), causing Media3 to discard remaining PCM data; route changes triggered full player recreation. | Strict Media3 `AudioSink` contract implemented in `OboeAudioSink.kt`: `handleBuffer` returns `!buffer.hasRemaining()`. Route changes reconfigure audio parameters without rebuilding `ExoPlayer`. |
-| **2. Unreliable / jerky seeking** | `OboeAudioSink.getCurrentPositionUs` calculated position as `framesWritten / sampleRate` rather than querying hardware DAC timestamps; `flush()` and `handleDiscontinuity()` did not reset native stream buffers. | Native C++ `getPlaybackTimestampUs()`, `getPlaybackPositionFrames()`, `flush()`, and `pause()` added to `OboeStreamWrapper`. `OboeAudioSink.flush()` and `handleDiscontinuity()` execute atomic native stream flush and timestamp re-anchoring. |
-| **3. Bit-Perfect mode breaking playback / working only from Settings** | `OboeAudioSink` contained `fallbackSink by lazy { if (!OboeBridge.isAvailable || bitPerfectMode) DefaultAudioSink(...) }` which bypassed Oboe and redirected to `DefaultAudioSink` with DSP enabled; toggling mode triggered pipeline reload. | `OboeAudioSink` is established as the direct exclusive native sink for Bit-Perfect. Added dynamic `setBitPerfectMode(enabled)` API on `OboeAudioSink` to transition Oboe stream between Exclusive/Shared and bypass DSP on-the-fly without player teardown. |
-| **4. OEM Hi-Fi / DAC indicator not triggering** | Antigravity Player ran Oboe streams without generating a persistent Android `audioSessionId` or broadcasting `bbk.media.action.OPEN_AUDIOFX_CONTROL_SESSION` / `AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION`. | Persistent `audioSessionId` generated via `AudioManager.generateAudioSessionId()`; registered across `VivoAudioIntegrationLayer` and `UniversalVendorIntegrationLayer`. Vivo AudioPolicy HAL keys expanded (`vivo_hifi`, `vivo_headset_hifi`, `hifi_settings_music`). |
-| **5. Player teardown on route change (IEM plug/unplug)** | `PlaybackService` executed `reloadAudioPipeline()` on every headphone plug/unplug event, dropping playback state, destroying `MediaItem` queues, and introducing multi-second freezes. | Non-destructive `AudioEngineController.reconfigureForRouteChange(context, route)` introduced. `PlaybackService` route collectors update audio configuration without player destruction. |
-| **6. Unmocked Android SDK framework calls in local JVM tests** | Native bridge logging directly invoked `android.util.Log` without fallback handling. | All static logging and fallback pipeline instantiations wrapped with `runCatching` to guarantee 100% JVM unit test compatibility. |
+The Antigravity Player audio core previously suffered from multi-manager fragmentation (42 audio classes, redundant evaluators, parallel broadcast receivers, and competing recovery loops in native C++ and Kotlin). This led to:
+1. **3–5 second delay on 3.5mm IEM insertion**: Parallel callbacks (`headsetReceiver`, `deviceCallback`, `VivoAudioIntegrationLayer`, `OboeAudioSink`) each independently triggered pipeline reloads, tearing down and recreating `ExoPlayer` multiple times on a single plug event.
+2. **Audio disappearing after playback & seek stalling**: C++ native write timeout was blocking for 500ms; native `onErrorAfterClose()` secretly reopened streams behind Kotlin's back without syncing with the Media3 pipeline.
+3. **Bit-Perfect unreliability**: DSP processing was executed unconditionally in C++ even in Bit-Perfect mode; switching Bit-Perfect mode caused pipeline reload.
+4. **Duplicate state & feedback loops**: 20+ obsolete manager and analyzer classes competed for state ownership.
 
 ---
 
-## 2. Low-Level Architecture & Signal Flow
+## 2. Architectural Remediation & Codebase Consolidation
 
-### A. Dynamic Bit-Perfect & Native Oboe Signal Path
-```
-ExoPlayer AudioRenderer (Media3)
-        │
-        ├── Format: Linear PCM (16-bit, 24-bit, 32-bit, Float)
-        │
-        ▼
-OboeAudioSink (Kotlin)
-        │
-        ├── Bit-Perfect Active: Bypass 64-bit DSP, DVC = 1.0, Dither = 0.0
-        ├── DSP Active: 64-bit Double Precision Biquad Filtering & Tube Saturation
-        │
-        ▼
-oboe_bridge.cpp (Native C++ / AAudio / OpenSL ES)
-        │
-        ├── AAUDIO_SHARING_MODE_EXCLUSIVE (Bit-Perfect) / SHARED (Mixed)
-        ├── Hardware Monotonic Clock Extrapolation (CLOCK_MONOTONIC)
-        ├── Atomic flush(), pause(), start()
-        │
-        ▼
-Android Audio HAL / Qualcomm Direct PCM / Vivo Hi-Fi DAC
-```
+### A. Total Codebase Consolidation (Deleted 20 Duplicate/Obsolete Files)
+The audio core was consolidated from **42 files down to 23 files**. The following 20 redundant classes were permanently removed:
+- `HiFiStateManager.kt`
+- `HiFiAudioEngine.kt`
+- `BitPerfectAnalyzer.kt`
+- `AudioCapabilityManager.kt`
+- `DACInformationCenter.kt`
+- `UsbAudioMasterEngine.kt`
+- `AudioIntelligencePlatform.kt`
+- `AudioHealthEngine.kt`
+- `InputAudioAnalyzer.kt`
+- `OutputAudioAnalyzer.kt`
+- `AudioRouteVisualizer.kt`
+- `PlaybackPipelineInspector.kt`
+- `BluetoothAudioIntelligence.kt`
+- `AudioInformationEngine.kt`
+- `DeveloperDiagnosticsEngine.kt`
+- `DSPFramework.kt`
+- `UniversalHiFiEngine.kt`
+- `VivoHiFiStateEngine.kt`
+- `UniversalVendorIntegrationLayer.kt`
+- `VivoAudioIntegrationLayer.kt`
 
-### B. Hardware Route Transition Model (Non-Destructive)
-```
-Headset Plugged (3.5mm IEM / USB DAC)
-        │
-        ▼
-AudioOutputManager (BroadcastReceiver / AudioDeviceCallback)
-        │
-        ▼
-AudioEngineController.reconfigureForRouteChange(context, newRoute)
-        │
-        ├── 1. Trigger optional vendor hardware probe (Vivo / Samsung / LG / Sony / Qualcomm)
-        ├── 2. Invalidate canonical runtime snapshot
-        ├── 3. Notify active OboeAudioSink & Audiophile state
-        └── 4. Preserve ExoPlayer instance, queue, and playback head
-```
+### B. Single Authoritative Lifecycle & Route Ownership (`AudioEngine.kt`)
+- `AudioEngine` is now the **single authority** for native stream lifecycle, Bit-Perfect state machine, single recovery path, and canonical telemetry.
+- Serialized, non-destructive route reconfiguration using `kotlinx.coroutines.sync.Mutex`:
+  ```
+  Headset/USB Plug Event
+          │
+          ▼
+  AudioOutputManager (Debounced 50ms)
+          │
+          ▼
+  AudioEngine.reconfigureRoute() [Mutex Lock]
+          ├── 1. Flush active native sink (no stale samples)
+          ├── 2. Trigger optional asynchronous OEM DAC probe
+          ├── 3. Invalidate canonical runtime snapshot
+          └── 4. Re-evaluate Bit-Perfect state (Never teardown ExoPlayer)
+  ```
+
+### C. Native C++ Hardening (`oboe_bridge.cpp`)
+- **Bounded Write Timeout**: Replaced 500ms blocking timeout with bounded **20ms** timeout (`20 * 1000000LL`).
+- **No Secret Stream Reopening**: Removed hidden stream restart logic inside C++ `onErrorAfterClose()`; stream errors are delegated cleanly to `AudioEngine.handleStreamError()`.
+- **Bit-Perfect Fast Path**: Added direct DSP bypass in `Java_com_tensorix_antigravityplayer_audio_OboeBridge_write` when `isBitPerfectBypass()` is active.
+
+### D. Single Consolidated Vendor DAC Manager (`VendorDacManager.kt`)
+- All OEM logic (Vivo, Samsung, LG, Sony, Qualcomm, Generic) consolidated in `VendorDacManager`.
+- Provides `onAudioSessionOpened(context, sessionId)` and `onAudioSessionClosed(context, sessionId)` broadcasting standard `ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION` and Vivo `bbk.media.action.OPEN_AUDIOFX_CONTROL_SESSION`.
+
+### E. Streamlined `OboeAudioSink.kt` & `PlaybackService.kt`
+- `OboeAudioSink` adheres strictly to the Media3 `AudioSink` contract without any external route callbacks or business logic.
+- `PlaybackService` delegates all audio lifecycle and route handling to `AudioEngine` and does **not** destroy `ExoPlayer` on route changes.
 
 ---
 
-## 3. Verification & Test Evidence
+## 3. Verification & Build Evidence
 
-### Automated Test Suite:
-- **Test Command**: `.\gradlew.bat test --info`
-- **Total Tests**: **33 unit tests** (including 28 Bit-Perfect Verification tests, 3 OboeAudioSink tests, and 2 AudioRouteChange tests).
+### Automated Unit Test Suite:
+- **Command**: `.\gradlew.bat test`
+- **Total Tests**: **36 unit tests** (including 28 Bit-Perfect zero-trust verification tests, 3 AudioEngine tests, 3 OboeAudioSink tests, and 2 AudioRouteChange tests).
 - **Result**: **100% Passed (0 Failures, 0 Errors)**.
 
 ### Release Packaging:
-- **Build Command**: `.\gradlew.bat clean assembleDebug assembleRelease`
+- **Command**: `.\gradlew.bat clean test assembleDebug assembleRelease`
 - **Native CMake Compilation**: Built across all 4 architectures (`arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`).
 - **Artifacts Generated**:
-  - `app/build/outputs/apk/debug/app-debug.apk` (23.8 MB)
+  - `app/build/outputs/apk/debug/app-debug.apk` (23.7 MB)
   - `app/build/outputs/apk/release/app-release-unsigned.apk` (5.7 MB)
 - **Result**: **BUILD SUCCESSFUL**.

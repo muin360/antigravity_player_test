@@ -16,6 +16,7 @@ import android.media.AudioTrack
 import android.os.Build
 import androidx.media3.common.util.UnstableApi
 import com.tensorix.antigravityplayer.player.PlaybackService
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,23 +40,34 @@ class AudioOutputManager(private val context: Context) {
     private val _outputState = MutableStateFlow(scanOutputStateInternal())
     val outputState: StateFlow<AudioOutputState> = _outputState.asStateFlow()
 
+    private val managerScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main + kotlinx.coroutines.SupervisorJob())
+    private var debounceJob: kotlinx.coroutines.Job? = null
+
+    private fun onRouteEvent() {
+        debounceJob?.cancel()
+        debounceJob = managerScope.launch {
+            kotlinx.coroutines.delay(50)
+            updateCache()
+            val newState = scanOutputStateInternal()
+            _outputState.value = newState
+            AudioEngine.reconfigureRoute(context, newState.activeRoute)
+        }
+    }
+
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            AudioEngineController.invalidate()
-            forceRefresh()
+            onRouteEvent()
         }
     }
 
     private val deviceCallback = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
         object : AudioDeviceCallback() {
             override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
-                AudioEngineController.invalidate()
-                forceRefresh()
+                onRouteEvent()
             }
 
             override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
-                AudioEngineController.invalidate()
-                forceRefresh()
+                onRouteEvent()
             }
         }
     } else null
@@ -107,6 +119,8 @@ class AudioOutputManager(private val context: Context) {
     }
 
     fun release() {
+        debounceJob?.cancel()
+        managerScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
         runCatching {
             context.unregisterReceiver(usbReceiver)
         }

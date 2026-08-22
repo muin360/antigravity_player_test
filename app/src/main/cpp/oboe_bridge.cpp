@@ -105,36 +105,12 @@ public:
 
 
     void onErrorAfterClose(oboe::AudioStream *audioStream, oboe::Result error) override {
-        LOGE("Oboe stream error: %s. Attempting graceful restart.", oboe::convertToText(error));
+        LOGE("Oboe stream error reported by HAL: %s. Notifying single authority.", oboe::convertToText(error));
         std::lock_guard<std::mutex> lock(streamMutex);
-        if (!stream) return;
-
-        oboe::AudioStreamBuilder builder;
-        builder.setDirection(oboe::Direction::Output)
-               ->setPerformanceMode(oboe::PerformanceMode::None)
-               ->setSharingMode(oboe::SharingMode::Exclusive)
-               ->setFormat(oboe::AudioFormat::Float)
-               ->setSampleRate(configuredSampleRate)
-               ->setChannelCount(configuredChannelCount)
-               ->setErrorCallback(this)
-               ->setUsage(oboe::Usage::Media)
-               ->setContentType(oboe::ContentType::Music);
-
-        oboe::Result result = builder.openStream(&stream);
-        if (result == oboe::Result::OK) {
-            stream->requestStart();
-            LOGI("Oboe stream restarted successfully in Exclusive mode (%d Hz)", configuredSampleRate);
-        } else {
-            LOGW("Restart in Exclusive mode failed: %s. Retrying in Shared mode.", oboe::convertToText(result));
-            builder.setSharingMode(oboe::SharingMode::Shared);
-            result = builder.openStream(&stream);
-            if (result == oboe::Result::OK) {
-                stream->requestStart();
-                LOGI("Oboe stream restarted in Shared mode fallback (%d Hz)", configuredSampleRate);
-            } else {
-                LOGE("Failed to restart Oboe stream in Shared mode: %s", oboe::convertToText(result));
-            }
+        if (stream) {
+            stream = nullptr;
         }
+        // Do NOT secretly reopen stream in native layer. AudioEngine owns recovery.
     }
 };
 
@@ -211,35 +187,48 @@ Java_com_tensorix_antigravityplayer_audio_OboeBridge_write(JNIEnv *env, jobject 
     if (!data) return -1;
 
     int32_t channelCount = wrapper->configuredChannelCount;
-
-    // 1. Process 64-bit Native C++ Audiophile DSP
-    wrapper->dsp.process(data, numFrames, channelCount);
-
-    // 2. High-Precision Resampling if hardware rate differs
+    bool isBypass = wrapper->dsp.isBitPerfectBypass();
     const float *sendData = data;
     int32_t framesToSend = numFrames;
 
-    if (!wrapper->resampler.isPassThrough()) {
-        int32_t resampledFrames = wrapper->resampler.process(data, numFrames, wrapper->resampleBuffer);
-        if (resampledFrames > 0) {
-            sendData = wrapper->resampleBuffer.data();
-            framesToSend = resampledFrames;
+    if (!isBypass) {
+        // 1. Process 64-bit Native C++ Audiophile DSP
+        wrapper->dsp.process(data, numFrames, channelCount);
+
+        // 2. High-Precision Resampling if hardware rate differs
+        if (!wrapper->resampler.isPassThrough()) {
+            int32_t resampledFrames = wrapper->resampler.process(data, numFrames, wrapper->resampleBuffer);
+            if (resampledFrames > 0) {
+                sendData = wrapper->resampleBuffer.data();
+                framesToSend = resampledFrames;
+            }
+        }
+    } else {
+        // Fast path for Bit-Perfect mode: zero DSP modification
+        if (!wrapper->resampler.isPassThrough()) {
+            int32_t resampledFrames = wrapper->resampler.process(data, numFrames, wrapper->resampleBuffer);
+            if (resampledFrames > 0) {
+                sendData = wrapper->resampleBuffer.data();
+                framesToSend = resampledFrames;
+            }
         }
     }
 
-    // 3. Native Direct Blocking Write (500ms timeout)
+    // 3. Native Direct Bounded Write (20ms timeout to prevent stalls)
     std::lock_guard<std::mutex> lock(wrapper->streamMutex);
     if (!wrapper->stream) {
         env->ReleaseFloatArrayElements(audioData, data, 0);
         return -1;
     }
 
-    int64_t timeoutNanos = 500 * 1000000LL; // 500ms
+    int64_t timeoutNanos = 20 * 1000000LL; // 20ms bounded timeout
     oboe::ResultWithValue<int32_t> result = wrapper->stream->write(sendData, framesToSend, timeoutNanos);
     int32_t written = result.value();
 
     if (result.error() != oboe::Result::OK) {
         LOGW("Oboe write error: %s", oboe::convertToText(result.error()));
+        env->ReleaseFloatArrayElements(audioData, data, 0);
+        return (result.error() == oboe::Result::ErrorTimeout) ? 0 : -1;
     }
 
     env->ReleaseFloatArrayElements(audioData, data, 0);
