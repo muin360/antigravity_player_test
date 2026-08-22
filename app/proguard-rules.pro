@@ -38,6 +38,11 @@
 -keep class com.tensorix.antigravityplayer.audio.AudioQualityState { *; }
 -keep class com.tensorix.antigravityplayer.audio.AudioTrackInfo { *; }
 -keep class com.tensorix.antigravityplayer.audio.AudiophilePlaybackSnapshot { *; }
+-keep class com.tensorix.antigravityplayer.audio.AudioInitializationCoordinator { *; }
+-keep class com.tensorix.antigravityplayer.audio.SafeAudioParameterController { *; }
+-keep class com.tensorix.antigravityplayer.audio.VendorDacManager { *; }
+-keep class com.tensorix.antigravityplayer.audio.VivoHiFiPermissionManager { *; }
+-keep class com.tensorix.antigravityplayer.util.CrashDiagnostics { *; }
 
 # -------------------------------------------------------------------------
 # Media3 & ExoPlayer Reflection / Codec Support

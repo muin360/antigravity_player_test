@@ -368,8 +368,8 @@ class PlaybackService : MediaSessionService() {
         val activeRouteType = audioOutputManager?.scanOutputState()?.activeRoute?.routeType ?: AudioOutputRouteType.SPEAKER
         val config = outputConfigManager?.getConfigForDevice(activeRouteType) ?: OutputDeviceConfig()
 
-        // 1. Activate OEM Hardware DACs
-        VendorDacManager.activateHardwareDac(applicationContext, config.exclusiveMode)
+        // 1. Asynchronously trigger vendor probe in background if needed
+        com.tensorix.antigravityplayer.audio.AudioInitializationCoordinator.triggerOptionalVendorProbe(applicationContext)
 
         val audioAttributes = AudioAttributes.Builder()
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
@@ -675,7 +675,6 @@ class PlaybackService : MediaSessionService() {
         peakAmplitude: Float = 0f,
         useAlbumGain: Boolean = false
     ) {
-        VendorDacManager.activateHardwareDac(applicationContext)
         val resolvedSampleRate = if (sampleRateHz > 0) sampleRateHz else 0 // 0 means unknown
         val resolvedBitDepth = if (bitDepth > 0) bitDepth else 0
         val isHiResSource = (resolvedBitDepth >= 24) || (resolvedSampleRate >= 88200)

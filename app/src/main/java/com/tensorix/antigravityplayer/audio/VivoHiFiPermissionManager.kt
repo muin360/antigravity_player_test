@@ -6,23 +6,39 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import com.tensorix.antigravityplayer.util.CrashDiagnostics
 
+/**
+ * Crash-safe manager for Vivo & OEM WRITE_SETTINGS permission.
+ */
 object VivoHiFiPermissionManager {
+
     fun hasWriteSettingsPermission(context: Context): Boolean {
-        return Settings.System.canWrite(context)
+        return try {
+            Settings.System.canWrite(context)
+        } catch (t: Throwable) {
+            CrashDiagnostics.record("VIVO_PERMISSION", "Settings.System.canWrite", t)
+            false
+        }
     }
 
     fun requestWriteSettingsPermission(activity: Activity) {
-        if (!Settings.System.canWrite(activity)) {
-            val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
-                data = Uri.parse("package:${activity.packageName}")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (!hasWriteSettingsPermission(activity)) {
+            try {
+                val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
+                    data = Uri.parse("package:${activity.packageName}")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                activity.startActivity(intent)
+            } catch (t: Throwable) {
+                CrashDiagnostics.record("VIVO_PERMISSION", "requestWriteSettingsPermission", t)
             }
-            activity.startActivity(intent)
         }
     }
 
     fun isVivoDevice(): Boolean {
-        return Build.MANUFACTURER.lowercase() == "vivo"
+        val manufacturer = (Build.MANUFACTURER ?: "").lowercase()
+        val brand = (Build.BRAND ?: "").lowercase()
+        return manufacturer.contains("vivo") || brand.contains("vivo") || brand.contains("iqoo")
     }
 }

@@ -96,8 +96,29 @@ class MainActivity : ComponentActivity() {
     ) { permissions ->
         val audioGranted = permissions[Manifest.permission.READ_MEDIA_AUDIO] ?: false
         val storageGranted = permissions[Manifest.permission.READ_EXTERNAL_STORAGE] ?: false
-        if (audioGranted || storageGranted) {
+        val hasMediaAccess = audioGranted || storageGranted
+        
+        com.tensorix.antigravityplayer.audio.AudioInitializationCoordinator.onPermissionsResolved(applicationContext, hasMediaAccess)
+        if (hasMediaAccess) {
             viewModel.scanLibrary()
+        }
+    }
+
+    private val micPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            viewModel.startVoiceInput()
+        } else {
+            viewModel.onMicPermissionDenied()
+        }
+    }
+
+    fun requestVoiceInput() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            viewModel.startVoiceInput()
+        } else {
+            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
 
@@ -147,7 +168,10 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                MainAppScreen(viewModel = viewModel)
+                MainAppScreen(
+                    viewModel = viewModel,
+                    onRequestVoiceInput = { requestVoiceInput() }
+                )
             }
         }
     }
@@ -155,7 +179,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         if (VivoHiFiPermissionManager.isVivoDevice() && VivoHiFiPermissionManager.hasWriteSettingsPermission(this)) {
-            VendorDacManager.activateHardwareDac(this)
+            com.tensorix.antigravityplayer.audio.AudioInitializationCoordinator.triggerOptionalVendorProbe(applicationContext)
         }
     }
 
@@ -173,11 +197,6 @@ class MainActivity : ComponentActivity() {
             ) {
                 permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
             }
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                permissionsToRequest.add(Manifest.permission.RECORD_AUDIO)
-            }
         } else {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED
@@ -190,16 +209,12 @@ class MainActivity : ComponentActivity() {
             ) {
                 permissionsToRequest.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             }
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                permissionsToRequest.add(Manifest.permission.RECORD_AUDIO)
-            }
         }
 
         if (permissionsToRequest.isNotEmpty()) {
             permissionLauncher.launch(permissionsToRequest.toTypedArray())
         } else {
+            com.tensorix.antigravityplayer.audio.AudioInitializationCoordinator.onPermissionsResolved(applicationContext, true)
             viewModel.scanLibrary()
         }
     }
@@ -208,7 +223,10 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @UnstableApi
 @Composable
-fun MainAppScreen(viewModel: MainViewModel) {
+fun MainAppScreen(
+    viewModel: MainViewModel,
+    onRequestVoiceInput: () -> Unit = {}
+) {
     val songs by viewModel.songs.collectAsState()
     val currentSong by viewModel.currentSong.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
@@ -497,7 +515,7 @@ fun MainAppScreen(viewModel: MainViewModel) {
             selectedModel = selectedAiModel,
             availableModelsMap = viewModel.aiKeyManager.availableModels,
             onSendMessage = { viewModel.sendAiMessage(it) },
-            onStartVoiceInput = { viewModel.startVoiceInput() },
+            onStartVoiceInput = onRequestVoiceInput,
             onSaveApiKey = { provider, key -> viewModel.saveAiApiKey(provider, key) },
             onSelectProvider = { provider -> viewModel.selectAiProvider(provider) },
             onSelectModel = { provider, model -> viewModel.selectAiModel(provider, model) },

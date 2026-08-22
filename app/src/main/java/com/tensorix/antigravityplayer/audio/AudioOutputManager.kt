@@ -86,7 +86,6 @@ class AudioOutputManager(private val context: Context) {
     }
 
     private fun updateCache() {
-        VendorDacManager.activateHardwareDac(context)
         cachedRoutes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
                 .filter { it.isSink }
@@ -99,7 +98,6 @@ class AudioOutputManager(private val context: Context) {
     }
 
     fun forceRefresh() {
-        VendorDacManager.activateHardwareDac(context)
         updateCache()
         _outputState.value = scanOutputStateInternal()
     }

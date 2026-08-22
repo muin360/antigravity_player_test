@@ -7,9 +7,13 @@ import android.media.AudioTrack
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import com.tensorix.antigravityplayer.util.CrashDiagnostics
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
- * Vendor-Specific DAC & Hardware HAL Integrator (Poweramp / UAPP Grade)
+ * Isolated Vendor-Specific DAC & Hardware HAL Integrator.
+ * Gated by strict OEM adapters with zero global parameter injection.
  */
 object VendorDacManager {
 
@@ -36,93 +40,167 @@ object VendorDacManager {
         private set
 
     @Volatile
-    var detectedDacChipsetName: String = "Internal Audio HAL"
-        private set
+    private var detectedDacNameInternal: String = "Internal Audio HAL"
+    val activeDacName: String get() = detectedDacNameInternal
 
-    fun activateHardwareDac(context: Context, forceExclusive: Boolean = false): HiFiActivationResult {
-        val manufacturer = Build.MANUFACTURER.lowercase()
-        val brand = Build.BRAND.lowercase()
-        val model = Build.MODEL.lowercase()
-        val hardware = Build.HARDWARE.lowercase()
+    // Adapter Interfaces
+    interface VendorAdapter {
+        fun activate(context: Context): Boolean
+        fun deactivate(context: Context)
+    }
 
-        Log.i(TAG, "🚀 [UNIVERSAL DAC PROBE] Manufacturer: $manufacturer, Brand: $brand, Model: $model")
+    object VivoAdapter : VendorAdapter {
+        override fun activate(context: Context): Boolean {
+            if (!SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.VIVO)) return false
+            
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "hifi_state", "on")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "hifi_dac_enable", "1")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "hifi_mode", "1")
 
-        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-
-        if (forceExclusive) {
-            audioManager?.setParameters("direct_pcm=1")
-            audioManager?.setParameters("audio_stream_direct=true")
-            audioManager?.setParameters("hifi_mode=1")
-        }
-
-        // Try ALL known OEM HiFi activation parameters
-        val oemParams = mapOf(
-            "VIVO" to listOf("hifi_state=on", "hifi_dac_enable=1", "hifi_mode=1"),
-            "SAMSUNG" to listOf("hifi_mode=on", "udp_on=1", "upscaling_mode=1"),
-            "ONEPLUS" to listOf("hifi_dac=on", "hifi=on", "dac_mode=hifi"),
-            "XIAOMI" to listOf("hifi_enable=1", "mi_hifi=1", "hifi_audio=on"),
-            "SONY" to listOf("audio_output_format=hi-res", "hires_mode=on"),
-            "LG" to listOf("hifi_dac=on", "quadbeat_hifi=1"),
-            "MOTOROLA" to listOf("hifi_enable=true"),
-            "AOSP" to listOf("af.fast_track_multiplier=1", "audio_hw_sync_for_session=1")
-        )
-
-        for ((oem, params) in oemParams) {
-            for (param in params) {
-                try {
-                    audioManager?.setParameters(param)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to set $oem param $param: ${e.message}")
-                }
+            // Safe Settings.System check
+            return try {
+                if (Settings.System.canWrite(context)) {
+                    val current = Settings.System.getString(context.contentResolver, "vivo_hifi_music_app_list") ?: ""
+                    if (!current.contains(context.packageName)) {
+                        Settings.System.putString(
+                            context.contentResolver,
+                            "vivo_hifi_music_app_list",
+                            if (current.isEmpty()) context.packageName else "$current,${context.packageName}"
+                        )
+                    }
+                    true
+                } else false
+            } catch (t: Throwable) {
+                CrashDiagnostics.record("VIVO_ADAPTER", "Settings.System write", t)
+                false
             }
         }
 
-        // 1. Vivo / iQOO Hi-Fi DAC Activation
-        if (manufacturer.contains("vivo") || brand.contains("vivo") || brand.contains("iqoo") || model.contains("x21")) {
-            activateVivoHiFi(context)
+        override fun deactivate(context: Context) {
+            if (SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.VIVO)) {
+                SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "hifi_state", "off")
+            }
+        }
+    }
+
+    object SamsungAdapter : VendorAdapter {
+        override fun activate(context: Context): Boolean {
+            if (!SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.SAMSUNG)) return false
+            
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.SAMSUNG, "hifi_mode", "on")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.SAMSUNG, "udp_on", "1")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.SAMSUNG, "upscaling_mode", "1")
+
+            return try {
+                if (Settings.System.canWrite(context)) {
+                    Settings.System.putInt(context.contentResolver, "sound_alive_uhq_upscaler", 1)
+                    true
+                } else false
+            } catch (t: Throwable) {
+                CrashDiagnostics.record("SAMSUNG_ADAPTER", "Settings.System write", t)
+                false
+            }
         }
 
-        // 2. LG Quad DAC
-        if (manufacturer.contains("lge") || brand.contains("lge")) {
-            activateLgQuadDac(context)
+        override fun deactivate(context: Context) {
+            if (SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.SAMSUNG)) {
+                SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.SAMSUNG, "upscaling_mode", "0")
+            }
+        }
+    }
+
+    object SonyAdapter : VendorAdapter {
+        override fun activate(context: Context): Boolean {
+            if (!SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.SONY)) return false
+            
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.SONY, "audio_output_format", "hi-res")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.SONY, "hires_mode", "on")
+
+            return try {
+                if (Settings.System.canWrite(context)) {
+                    Settings.System.putInt(context.contentResolver, "sony_hires_audio_enabled", 1)
+                    true
+                } else false
+            } catch (t: Throwable) {
+                CrashDiagnostics.record("SONY_ADAPTER", "Settings.System write", t)
+                false
+            }
         }
 
-        // 3. Samsung UHQ
-        if (manufacturer.contains("samsung") || brand.contains("samsung")) {
-            activateSamsungUhq(context)
+        override fun deactivate(context: Context) {}
+    }
+
+    object LGAdapter : VendorAdapter {
+        override fun activate(context: Context): Boolean {
+            if (!SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.LG)) return false
+            
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.LG, "hifi_dac", "on")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.LG, "quadbeat_hifi", "1")
+
+            return try {
+                if (Settings.System.canWrite(context)) {
+                    Settings.System.putInt(context.contentResolver, "quad_dac_state", 1)
+                    true
+                } else false
+            } catch (t: Throwable) {
+                CrashDiagnostics.record("LG_ADAPTER", "Settings.System write", t)
+                false
+            }
         }
 
-        // 4. Sony Xperia Hi-Res
-        if (manufacturer.contains("sony") || brand.contains("sony")) {
-            activateSonyHiRes(context)
+        override fun deactivate(context: Context) {
+            if (SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.LG)) {
+                SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.LG, "hifi_dac", "off")
+            }
+        }
+    }
+
+    object QualcommAdapter : VendorAdapter {
+        override fun activate(context: Context): Boolean {
+            if (!SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.QUALCOMM)) return false
+            
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.QUALCOMM, "direct_pcm", "1")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.QUALCOMM, "audio_stream_direct", "true")
+            return true
         }
 
-        // 9. Qualcomm Snapdragon Direct PCM
-        activateQualcommDirectParameters(context)
+        override fun deactivate(context: Context) {}
+    }
 
-        // 10. Universal AudioSystem HAL setParameters injection
-        injectUniversalAudioSystemParameters(context)
+    object GenericAdapter : VendorAdapter {
+        override fun activate(context: Context): Boolean = true
+        override fun deactivate(context: Context) {}
+    }
+
+    suspend fun activateHardwareDacAsync(context: Context, forceExclusive: Boolean = false): HiFiActivationResult =
+        withContext(Dispatchers.IO) {
+            activateHardwareDac(context, forceExclusive)
+        }
+
+    fun activateHardwareDac(context: Context, forceExclusive: Boolean = false): HiFiActivationResult {
+        val manufacturer = (Build.MANUFACTURER ?: "").lowercase()
+        val brand = (Build.BRAND ?: "").lowercase()
+        val model = (Build.MODEL ?: "").lowercase()
+
+        Log.i(TAG, "🚀 [ISOLATED DAC PROBE] Manufacturer: $manufacturer, Brand: $brand, Model: $model")
+
+        // Activate matched vendor adapter ONLY
+        when {
+            SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.VIVO) -> VivoAdapter.activate(context)
+            SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.SAMSUNG) -> SamsungAdapter.activate(context)
+            SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.SONY) -> SonyAdapter.activate(context)
+            SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.LG) -> LGAdapter.activate(context)
+            SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.QUALCOMM) -> QualcommAdapter.activate(context)
+            else -> GenericAdapter.activate(context)
+        }
 
         // Verification phase
-        var hifiConfirmed = false
-        var confirmedParam = ""
-        val checkParams = listOf("hifi_state", "hifi_dac", "hifi_mode", "hifi")
-        for (p in checkParams) {
-            try {
-                val value = audioManager?.getParameters(p)
-                if (!value.isNullOrBlank() && !value.contains("off", true) && !value.contains("0")) {
-                    hifiConfirmed = true
-                    confirmedParam = "$p=$value"
-                }
-            } catch (e: Exception) { }
-        }
-
-        // Sync with authoritative HardwareHiFiVerifier
         val verifiedReport = HardwareHiFiVerifier.probeHardwareState(context)
-        isVivoHiFiActive = verifiedReport.isVendorHiFiActive || hifiConfirmed
+        isVivoHiFiActive = verifiedReport.isVendorHiFiActive
         isQualcommDirectActive = verifiedReport.isDirectOutputSupported
         detectedDacNameInternal = verifiedReport.activeDacName
 
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         val sampleRate = audioManager?.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toIntOrNull() ?: 0
         val framesPerBuffer = audioManager?.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)?.toIntOrNull() ?: 1024
         val isLowLatency = framesPerBuffer <= 256
@@ -134,127 +212,46 @@ object VendorDacManager {
         return HiFiActivationResult(
             isHiFiConfirmed = isVivoHiFiActive,
             activeOem = manufacturer.uppercase(),
-            confirmedParameter = confirmedParam,
+            confirmedParameter = if (isVivoHiFiActive) "vivo_hifi_active" else "standard_hal",
             outputSampleRate = sampleRate,
             isLowLatencyPath = isLowLatency,
             isWiredConnected = isWired,
-            isExclusiveModeActive = false
+            isExclusiveModeActive = forceExclusive
         )
     }
-    
-    private var detectedDacNameInternal: String = "Internal Audio HAL"
-    val activeDacName: String get() = detectedDacNameInternal
 
     fun prepareHardwareForDirectPlayback(context: Context, sampleRate: Int) {
-        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-        runCatching {
-            audioManager.setParameters("direct_pcm=1")
-            audioManager.setParameters("vivo_hifi_state=1")
-            audioManager.setParameters("vivo_headset_hifi=1")
-            audioManager.setParameters("sampling_rate=$sampleRate")
-            audioManager.setParameters("audio_stream_direct=true")
-        }
-        // Note: setParameters() সব device-এ কাজ করে না — runCatching দিয়ে safely handle করা হচ্ছে
-    }
-
-    private fun activateVivoHiFi(context: Context): Boolean {
-        if (!Settings.System.canWrite(context)) return false
-        return try {
-            val current = Settings.System.getString(context.contentResolver, "vivo_hifi_music_app_list") ?: ""
-            if (!current.contains(context.packageName)) {
-                Settings.System.putString(
-                    context.contentResolver,
-                    "vivo_hifi_music_app_list",
-                    if (current.isEmpty()) context.packageName else "$current,${context.packageName}"
-                )
-            }
-            true
-        } catch (e: SecurityException) {
-            false
-        }
-    }
-
-    private fun activateLgQuadDac(context: Context) {
-        try {
-            if (Settings.System.canWrite(context)) {
-                val cr = context.contentResolver
-                Settings.System.putInt(cr, "quad_dac_state", 1)
-            }
-            Log.i(TAG, "LG Quad DAC Armed")
-        } catch (e: Exception) {
-            Log.w(TAG, "LG Quad DAC trigger notice: ${e.message}")
-        }
-    }
-
-    private fun activateSamsungUhq(context: Context) {
-        try {
-            if (Settings.System.canWrite(context)) {
-                val cr = context.contentResolver
-                Settings.System.putInt(cr, "sound_alive_uhq_upscaler", 1)
-            }
-            Log.i(TAG, "Samsung UHQ Armed")
-        } catch (e: Exception) {
-            Log.w(TAG, "Samsung UHQ trigger notice: ${e.message}")
-        }
-    }
-
-    private fun activateSonyHiRes(context: Context) {
-        try {
-            if (Settings.System.canWrite(context)) {
-                val cr = context.contentResolver
-                Settings.System.putInt(cr, "sony_hires_audio_enabled", 1)
-            }
-            Log.i(TAG, "Sony Hi-Res Armed")
-        } catch (e: Exception) {
-            Log.w(TAG, "Sony Hi-Res trigger notice: ${e.message}")
-        }
-    }
-
-    private fun activateQualcommDirectParameters(context: Context) {
-        try {
-            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-            audioManager?.setParameters("direct_pcm=1")
-            audioManager?.setParameters("audio_stream_direct=true")
-        } catch (e: Exception) {
-            // Ignored
-        }
-    }
-
-    private fun injectUniversalAudioSystemParameters(context: Context) {
-        try {
-            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-            audioManager?.setParameters("hifi=1")
-            audioManager?.setParameters("hifi_mode=on")
-            audioManager?.setParameters("direct_pcm=1")
-            audioManager?.setParameters("bit_perfect=1")
-        } catch (e: Exception) {
-            // Ignored
+        if (SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.VIVO)) {
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "direct_pcm", "1")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "vivo_hifi_state", "1")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "vivo_headset_hifi", "1")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "sampling_rate", "$sampleRate")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.VIVO, "audio_stream_direct", "true")
+        } else if (SafeAudioParameterController.isVendorMatch(SafeAudioParameterController.TargetVendor.QUALCOMM)) {
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.QUALCOMM, "direct_pcm", "1")
+            SafeAudioParameterController.setParameter(context, SafeAudioParameterController.TargetVendor.QUALCOMM, "audio_stream_direct", "true")
         }
     }
 
     fun deactivate(context: Context) {
-        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-        val offParams = listOf(
-            "hifi_state=off", "hifi_dac=off", "hifi_mode=off", "hifi=off", 
-            "hifi_enable=0", "mi_hifi=0", "upscaling_mode=0"
-        )
-        for (p in offParams) {
-            try {
-                audioManager?.setParameters(p)
-            } catch (e: Exception) {
-                Log.e(TAG, "Deactivation error: ${e.message}")
-            }
-        }
+        VivoAdapter.deactivate(context)
+        SamsungAdapter.deactivate(context)
+        LGAdapter.deactivate(context)
     }
 
     fun getDirectBufferSize(sampleRate: Int, channelCount: Int, bytesPerSample: Int): Int {
-        val minBufferSize = AudioTrack.getMinBufferSize(
-            sampleRate,
-            if (channelCount == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO,
-            if (bytesPerSample >= 4) AudioFormat.ENCODING_PCM_FLOAT else AudioFormat.ENCODING_PCM_16BIT
-        )
-        val multiplier = if (sampleRate >= 88200) 4 else 2
-        return if (minBufferSize > 0) (minBufferSize * multiplier).coerceAtLeast(minBufferSize) else 0
+        return try {
+            val minBufferSize = AudioTrack.getMinBufferSize(
+                sampleRate,
+                if (channelCount == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO,
+                if (bytesPerSample >= 4) AudioFormat.ENCODING_PCM_FLOAT else AudioFormat.ENCODING_PCM_16BIT
+            )
+            val multiplier = if (sampleRate >= 88200) 4 else 2
+            if (minBufferSize > 0) (minBufferSize * multiplier).coerceAtLeast(minBufferSize) else 0
+        } catch (t: Throwable) {
+            CrashDiagnostics.record("VENDOR_DAC", "getDirectBufferSize", t)
+            4096
+        }
     }
 }
 
@@ -267,5 +264,3 @@ data class HiFiActivationResult(
     val isWiredConnected: Boolean,
     var isExclusiveModeActive: Boolean
 )
-
-enum class HiFiStatus { ACTIVE, INACTIVE, UNKNOWN }

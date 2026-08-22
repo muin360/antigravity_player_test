@@ -322,6 +322,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun onMicPermissionDenied() {
+        addAiReply("Microphone permission was not granted. Voice input requires microphone access.")
+    }
+
     fun saveAiApiKey(provider: AiProvider, key: String) {
         aiKeyManager.setApiKey(provider, key)
     }
