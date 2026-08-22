@@ -167,9 +167,12 @@ class OboeAudioSink(
         fallbackSink?.pause()
     }
 
+    private var isDraining = false
+
     override fun handleDiscontinuity() {
         isSeekingOrDiscontinuous = true
         startMediaTimeUs = C.TIME_UNSET
+        isDraining = false
         if (streamHandle != 0L) {
             OboeBridge.flushStream(streamHandle)
         }
@@ -180,6 +183,7 @@ class OboeAudioSink(
         framesWritten = 0L
         startMediaTimeUs = C.TIME_UNSET
         isSeekingOrDiscontinuous = true
+        isDraining = false
         if (streamHandle != 0L) {
             OboeBridge.flushStream(streamHandle)
         }
@@ -188,6 +192,7 @@ class OboeAudioSink(
 
     override fun reset() {
         isPlaying = false
+        isDraining = false
         framesWritten = 0L
         startMediaTimeUs = C.TIME_UNSET
         isSeekingOrDiscontinuous = false
@@ -308,19 +313,21 @@ class OboeAudioSink(
     }
 
     override fun playToEndOfStream() {
+        isDraining = true
         fallbackSink?.playToEndOfStream()
     }
 
     override fun isEnded(): Boolean {
         if (fallbackSink != null) return fallbackSink!!.isEnded
-        return !isPlaying && !hasPendingData()
+        if (streamHandle == 0L) return true
+        return (isDraining || !isPlaying) && !hasPendingData()
     }
 
     override fun hasPendingData(): Boolean {
         if (fallbackSink != null) return fallbackSink!!.hasPendingData()
         if (streamHandle == 0L) return false
         val hwFrames = OboeBridge.getPlaybackPositionFrames(streamHandle)
-        return isPlaying && (framesWritten > hwFrames)
+        return framesWritten > hwFrames
     }
 
     override fun setPlaybackParameters(playbackParameters: PlaybackParameters) {
@@ -388,6 +395,9 @@ class OboeAudioSink(
             if (streamHandle != 0L) {
                 closeOboeStream()
                 openOboeStream()
+                if (streamHandle != 0L && isPlaying) {
+                    OboeBridge.startStream(streamHandle)
+                }
             }
         }
     }
@@ -475,7 +485,7 @@ class OboeAudioSink(
                 currentStreamInfo = null
             }
             streamHandle = 0L
-            AudioEngineController.invalidate()
+            AudioEngine.invalidate()
         }
     }
 }

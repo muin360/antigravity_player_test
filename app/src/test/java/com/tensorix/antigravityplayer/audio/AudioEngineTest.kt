@@ -2,6 +2,8 @@ package com.tensorix.antigravityplayer.audio
 
 import android.content.Context
 import androidx.media3.common.util.UnstableApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -20,7 +22,7 @@ class AudioEngineTest {
     @Before
     fun setUp() {
         mockContext = mock()
-        AudioEngine.invalidate()
+        AudioEngine.resetForTesting()
     }
 
     @Test
@@ -96,5 +98,52 @@ class AudioEngineTest {
         // Verifies recovery handled and reset back to normal
         assertEquals("NORMAL", AudioEngine.recoveryState.value)
         assertNull(AudioEngine.snapshot.value)
+    }
+
+    @Test
+    fun `test AudioEngine concurrent route changes resolve sequentially to latest route`() = runBlocking {
+        val route1 = AudioRouteCapability(
+            routeType = AudioOutputRouteType.SPEAKER,
+            deviceName = "Speaker",
+            productName = null,
+            sampleRates = listOf(48000),
+            encodings = listOf(16),
+            channelCounts = listOf(2),
+            isDirectPlaybackCapable = false,
+            canBeExclusive = false
+        )
+        val route2 = AudioRouteCapability(
+            routeType = AudioOutputRouteType.WIRED_HEADSET,
+            deviceName = "Wired IEM",
+            productName = null,
+            sampleRates = listOf(48000, 96000),
+            encodings = listOf(16, 24),
+            channelCounts = listOf(2),
+            isDirectPlaybackCapable = true,
+            canBeExclusive = true
+        )
+
+        // Launch concurrent route changes in coroutine scope
+        coroutineScope {
+            val job1 = async { AudioEngine.reconfigureRoute(mockContext, route1) }
+            val job2 = async { AudioEngine.reconfigureRoute(mockContext, route2) }
+
+            job1.await()
+            job2.await()
+        }
+
+        assertNotNull(AudioEngine.activeRoute.value)
+    }
+
+    @Test
+    fun `test BitPerfect unavailable falls back to standard playback without stopping`() {
+        AudioEngine.setBitPerfectMode(true)
+        assertEquals(BitPerfectState.REQUESTED, AudioEngine.getBitPerfectState())
+
+        // Signal unavailable
+        AudioEngine.setBitPerfectState(BitPerfectState.UNAVAILABLE)
+        assertEquals(BitPerfectState.UNAVAILABLE, AudioEngine.getBitPerfectState())
+        // AudioEngine remains operational
+        assertEquals("NORMAL", AudioEngine.recoveryState.value)
     }
 }

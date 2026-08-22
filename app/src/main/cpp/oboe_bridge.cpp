@@ -96,9 +96,33 @@ public:
     }
 
     int64_t getPlaybackTimestampUs() {
-        int64_t frames = getPlaybackPositionFrames();
         std::lock_guard<std::mutex> lock(streamMutex);
         if (!stream || stream->getSampleRate() <= 0) return 0;
+
+        int64_t framePosition = 0;
+        int64_t timeNanoseconds = 0;
+        auto result = stream->getTimestamp(CLOCK_MONOTONIC, &framePosition, &timeNanoseconds);
+        int64_t frames = 0;
+        if (result == oboe::Result::OK && timeNanoseconds > 0) {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            int64_t nowNs = static_cast<int64_t>(ts.tv_sec) * 1000000000LL + static_cast<int64_t>(ts.tv_nsec);
+            int64_t deltaNs = nowNs - timeNanoseconds;
+            if (deltaNs >= 0 && stream->getSampleRate() > 0) {
+                int64_t extrapolated = framePosition + (deltaNs * stream->getSampleRate() / 1000000000LL);
+                frames = std::max<int64_t>(0, std::min<int64_t>(extrapolated, stream->getFramesWritten()));
+            } else {
+                frames = std::max<int64_t>(0, std::min<int64_t>(framePosition, stream->getFramesWritten()));
+            }
+        } else {
+            auto framesRead = stream->getFramesRead();
+            if (framesRead > 0) {
+                frames = std::max<int64_t>(0, std::min<int64_t>(framesRead, stream->getFramesWritten()));
+            } else {
+                int32_t bufferSize = stream->getBufferSizeInFrames();
+                frames = std::max<int64_t>(0, stream->getFramesWritten() - static_cast<int64_t>(bufferSize));
+            }
+        }
         return (frames * 1000000LL) / stream->getSampleRate();
     }
 
@@ -238,7 +262,9 @@ Java_com_tensorix_antigravityplayer_audio_OboeBridge_write(JNIEnv *env, jobject 
         return written;
     } else {
         double ratio = static_cast<double>(framesToSend) / static_cast<double>(numFrames);
-        return (ratio > 0.0) ? static_cast<jint>(std::round(written / ratio)) : numFrames;
+        if (ratio <= 0.0) return numFrames;
+        jint inputConsumed = static_cast<jint>(std::round(static_cast<double>(written) / ratio));
+        return std::min<jint>(numFrames, std::max<jint>(0, inputConsumed));
     }
 }
 

@@ -4,14 +4,20 @@ import android.content.Context
 import androidx.media3.common.util.UnstableApi
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Before
 import org.junit.Test
 import org.mockito.kotlin.mock
 
 @UnstableApi
 class AudioRouteChangeTest {
 
+    @Before
+    fun setUp() {
+        AudioEngine.resetForTesting()
+    }
+
     @Test
-    fun `test AudioEngineController reconfigureForRouteChange updates state safely`() {
+    fun `test AudioEngine reconfigureForRouteChange updates state safely`() {
         val context = mock<Context>()
         val route = AudioRouteCapability(
             routeType = AudioOutputRouteType.WIRED_HEADSET,
@@ -24,9 +30,9 @@ class AudioRouteChangeTest {
             canBeExclusive = true
         )
 
-        AudioEngineController.reconfigureForRouteChange(context, route)
-        assertNull(AudioEngineController.snapshot.value)
-        assertEquals(BitPerfectState.UNKNOWN, AudioEngineController.getBitPerfectState())
+        AudioEngine.reconfigureForRouteChange(context, route)
+        assertNull(AudioEngine.snapshot.value)
+        assertEquals(BitPerfectState.UNKNOWN, AudioEngine.getBitPerfectState())
     }
 
     @Test
@@ -43,7 +49,7 @@ class AudioRouteChangeTest {
             canBeExclusive = false
         )
 
-        AudioEngineController.reconfigureForRouteChange(context, route)
-        assertNull(AudioEngineController.snapshot.value)
+        AudioEngine.reconfigureForRouteChange(context, route)
+        assertNull(AudioEngine.snapshot.value)
     }
 }

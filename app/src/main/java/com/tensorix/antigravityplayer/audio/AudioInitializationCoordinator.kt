@@ -55,8 +55,8 @@ object AudioInitializationCoordinator {
             scope.launch {
                 try {
                     _state.value = AppInitializationState.AUDIO_READY
-                    Log.i(TAG, "Initializing canonical AudioEngineController...")
-                    AudioEngineController.invalidate()
+                    Log.i(TAG, "Initializing canonical AudioEngine...")
+                    AudioEngine.invalidate()
                     
                     // Run optional vendor probe asynchronously in background
                     triggerOptionalVendorProbe(context)
@@ -81,7 +81,7 @@ object AudioInitializationCoordinator {
                 try {
                     Log.i(TAG, "Running background optional vendor DAC probe...")
                     VendorDacManager.activateHardwareDac(context)
-                    AudioEngineController.invalidate()
+                    AudioEngine.invalidate()
                 } catch (t: Throwable) {
                     CrashDiagnostics.record(
                         subsystem = "AUDIO_INIT_COORDINATOR",

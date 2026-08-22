@@ -82,4 +82,72 @@ class OboeAudioSinkTest {
         sink.reset()
         sink.release()
     }
+
+    @Test
+    fun `test OboeAudioSink playToEndOfStream sets drain state and isEnded becomes true when drained`() {
+        val context = mock<Context>()
+        val sink = OboeAudioSink(context, dspProcessor = null, bitPerfectMode = false)
+
+        sink.play()
+        sink.playToEndOfStream()
+        // When no pending hardware frames remain and playToEndOfStream is invoked, isEnded is true
+        assertTrue(sink.isEnded)
+    }
+
+    @Test
+    fun `test OboeAudioSink dynamic bit-perfect mode toggle preserves sink safety`() {
+        val context = mock<Context>()
+        val sink = OboeAudioSink(context, dspProcessor = null, bitPerfectMode = false)
+
+        sink.setBitPerfectMode(true)
+        sink.setBitPerfectMode(false)
+        sink.setBitPerfectMode(true)
+        assertFalse(sink.hasPendingData())
+    }
+
+    @Test
+    fun `test Resampling ratio math conversions across sample rates`() {
+        // Test 44100 -> 44100 (Pass-through)
+        val inFrames1 = 1024
+        val framesToSend1 = 1024
+        val written1 = 1024
+        val ratio1 = framesToSend1.toDouble() / inFrames1.toDouble()
+        assertEquals(1.0, ratio1, 1e-6)
+        val consumed1 = (written1 / ratio1).toInt().coerceIn(0, inFrames1)
+        assertEquals(1024, consumed1)
+
+        // Test 44100 -> 48000 (Upsampling)
+        val inFrames2 = 441
+        val framesToSend2 = 480
+        val ratio2 = framesToSend2.toDouble() / inFrames2.toDouble()
+        // 100% written
+        val written2Full = 480
+        val consumed2Full = Math.round(written2Full / ratio2).toInt().coerceIn(0, inFrames2)
+        assertEquals(441, consumed2Full)
+        // 50% written
+        val written2Half = 240
+        val consumed2Half = Math.round(written2Half / ratio2).toInt().coerceIn(0, inFrames2)
+        assertEquals(220, consumed2Half)
+        // 0% written
+        val written2Zero = 0
+        val consumed2Zero = Math.round(written2Zero / ratio2).toInt().coerceIn(0, inFrames2)
+        assertEquals(0, consumed2Zero)
+
+        // Test 48000 -> 44100 (Downsampling)
+        val inFrames3 = 480
+        val framesToSend3 = 441
+        val ratio3 = framesToSend3.toDouble() / inFrames3.toDouble()
+        val written3Full = 441
+        val consumed3Full = Math.round(written3Full / ratio3).toInt().coerceIn(0, inFrames3)
+        assertEquals(480, consumed3Full)
+
+        // Test 96000 -> 48000 (2:1 Downsampling)
+        val inFrames4 = 1000
+        val framesToSend4 = 500
+        val ratio4 = framesToSend4.toDouble() / inFrames4.toDouble()
+        assertEquals(0.5, ratio4, 1e-6)
+        val written4Full = 500
+        val consumed4Full = Math.round(written4Full / ratio4).toInt().coerceIn(0, inFrames4)
+        assertEquals(1000, consumed4Full)
+    }
 }

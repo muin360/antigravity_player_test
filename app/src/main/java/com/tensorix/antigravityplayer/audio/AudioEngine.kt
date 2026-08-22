@@ -65,12 +65,27 @@ object AudioEngine {
 
     fun invalidate() {
         _snapshot.value = null
+        if (!_bitPerfectRequested.value) {
+            _bitPerfectState.value = BitPerfectState.UNKNOWN
+        }
+    }
+
+    fun resetForTesting() {
+        _snapshot.value = null
+        _activeRoute.value = null
+        _bitPerfectRequested.value = false
+        _bitPerfectState.value = BitPerfectState.UNKNOWN
+        _recoveryState.value = "NORMAL"
     }
 
     fun setBitPerfectMode(enabled: Boolean) {
         _bitPerfectRequested.value = enabled
         _bitPerfectState.value = if (enabled) BitPerfectState.REQUESTED else BitPerfectState.UNKNOWN
         invalidate()
+    }
+
+    fun setBitPerfectState(state: BitPerfectState) {
+        _bitPerfectState.value = state
     }
 
     /**
