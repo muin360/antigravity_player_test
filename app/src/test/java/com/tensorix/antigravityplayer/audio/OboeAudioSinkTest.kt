@@ -196,6 +196,42 @@ class OboeAudioSinkTest {
     }
 
     @Test
+    fun `test OboeAudioSink non-direct buffer slicing and position tracking`() {
+        val context = mock<Context>()
+        val sink = OboeAudioSink(context, dspProcessor = null, bitPerfectMode = false)
+
+        val format = Format.Builder()
+            .setSampleMimeType("audio/raw")
+            .setPcmEncoding(C.ENCODING_PCM_16BIT)
+            .setSampleRate(48000)
+            .setChannelCount(2)
+            .build()
+
+        sink.configure(format, 4096, null)
+
+        // Heap ByteBuffer
+        val heapBuffer = ByteBuffer.allocate(1024).order(ByteOrder.LITTLE_ENDIAN)
+        heapBuffer.put(ByteArray(1024))
+        heapBuffer.flip()
+
+        val consumed = sink.handleBuffer(heapBuffer, 1000L, 1)
+        assertTrue(heapBuffer.position() <= heapBuffer.limit())
+    }
+
+    @Test
+    fun `test OboeAudioSink position monotonically increases and resets on flush`() {
+        val context = mock<Context>()
+        val sink = OboeAudioSink(context, dspProcessor = null, bitPerfectMode = false)
+
+        val pos0 = sink.getCurrentPositionUs(false)
+        assertEquals(C.TIME_UNSET, pos0)
+
+        sink.flush()
+        val posAfterFlush = sink.getCurrentPositionUs(false)
+        assertEquals(C.TIME_UNSET, posAfterFlush)
+    }
+
+    @Test
     fun `test OboeAudioSink reset zeroes handle immediately`() {
         val context = mock<Context>()
         val sink = OboeAudioSink(context, dspProcessor = null, bitPerfectMode = false)

@@ -256,6 +256,9 @@ class OboeAudioSink(
         fallbackSink?.release()
     }
 
+    private var directByteBuffer: ByteBuffer = ByteBuffer.allocateDirect(65536).order(ByteOrder.LITTLE_ENDIAN)
+    private var streamGeneration: Long = 0L
+
     @WorkerThread
     override fun handleBuffer(
         buffer: ByteBuffer,
@@ -293,52 +296,38 @@ class OboeAudioSink(
         val numFrames = sampleCount / channelCount
         if (numFrames == 0) return true
 
-        if (floatBuffer.size < sampleCount) {
-            floatBuffer = FloatArray(sampleCount * 2)
+        val framesWrittenResult = if (buffer.isDirect) {
+            OboeBridge.writeDirect(
+                handle = streamHandle,
+                generation = streamGeneration,
+                directBuffer = buffer,
+                offsetBytes = initialPosition,
+                numBytes = remaining,
+                numFrames = numFrames,
+                pcmEncoding = pcmEncoding,
+                isBitPerfect = bitPerfectMode
+            )
+        } else {
+            if (directByteBuffer.capacity() < remaining) {
+                directByteBuffer = ByteBuffer.allocateDirect(remaining * 2).order(ByteOrder.LITTLE_ENDIAN)
+            }
+            directByteBuffer.clear()
+            val slice = buffer.slice()
+            directByteBuffer.put(slice)
+            directByteBuffer.flip()
+
+            OboeBridge.writeDirect(
+                handle = streamHandle,
+                generation = streamGeneration,
+                directBuffer = directByteBuffer,
+                offsetBytes = 0,
+                numBytes = remaining,
+                numFrames = numFrames,
+                pcmEncoding = pcmEncoding,
+                isBitPerfect = bitPerfectMode
+            )
         }
 
-        val duplicate = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
-
-        when (pcmEncoding) {
-            C.ENCODING_PCM_FLOAT -> {
-                val floatView = duplicate.asFloatBuffer()
-                floatView[floatBuffer, 0, sampleCount]
-            }
-            C.ENCODING_PCM_16BIT -> {
-                for (i in 0 until sampleCount) {
-                    floatBuffer[i] = duplicate.short.toFloat() / 32768.0f
-                }
-            }
-            C.ENCODING_PCM_24BIT -> {
-                for (i in 0 until sampleCount) {
-                    val b0 = duplicate.get().toInt() and 0xFF
-                    val b1 = duplicate.get().toInt() and 0xFF
-                    val b2 = duplicate.get().toInt() and 0xFF
-                    val raw24 = (b2 shl 16) or (b1 shl 8) or b0
-                    val sampleInt24 = if (raw24 and 0x800000 != 0) raw24 or -0x1000000 else raw24
-                    floatBuffer[i] = sampleInt24.toFloat() / 8388608.0f
-                }
-            }
-            C.ENCODING_PCM_32BIT -> {
-                for (i in 0 until sampleCount) {
-                    floatBuffer[i] = duplicate.int.toDouble().div(2147483648.0).toFloat()
-                }
-            }
-            else -> {
-                for (i in 0 until sampleCount) {
-                    floatBuffer[i] = duplicate.short.toFloat() / 32768.0f
-                }
-            }
-        }
-
-        // Apply software volume if DVC is not handling it and not in bit-perfect mode
-        if (volume != 1.0f && !bitPerfectMode) {
-            for (i in 0 until sampleCount) {
-                floatBuffer[i] *= volume
-            }
-        }
-
-        val framesWrittenResult = OboeBridge.write(streamHandle, floatBuffer, numFrames)
         if (framesWrittenResult > 0) {
             framesWritten += framesWrittenResult
 
@@ -365,7 +354,7 @@ class OboeAudioSink(
 
         // Error code returned by Oboe
         val errorCode = framesWrittenResult
-        runCatching { Log.e(TAG_LOG, "Oboe write failed with error code: $errorCode. Delegating recovery to AudioEngine.") }
+        runCatching { Log.w(TAG_LOG, "Oboe write returned error code $errorCode. Delegating recovery to AudioEngine.") }
         closeOboeStream()
 
         AudioEngine.handleStreamError(errorCode, context)
@@ -541,11 +530,12 @@ class OboeAudioSink(
             if (handle != 0L) {
                 timeNativeOpenedMs = android.os.SystemClock.elapsedRealtime()
                 streamHandle = handle
+                streamGeneration = OboeBridge.getStreamGeneration(handle)
                 currentActiveHandle = handle
                 currentStreamInfo = OboeBridge.getNativeStreamInfo(handle)
                 val exclusive = OboeBridge.isExclusive(handle)
                 val actualRate = OboeBridge.getSampleRate(handle)
-                runCatching { Log.i(TAG_LOG, "✦ Native Oboe Stream Opened: Handle=$streamHandle, Exclusive=$exclusive, Rate=$actualRate Hz, DeviceId=$targetDevice, BitPerfect=$bitPerfectMode ✦") }
+                runCatching { Log.i(TAG_LOG, "✦ Native Oboe Stream Opened: Handle=$streamHandle, Gen=$streamGeneration, Exclusive=$exclusive, Rate=$actualRate Hz, DeviceId=$targetDevice, BitPerfect=$bitPerfectMode ✦") }
 
                 syncDspParameters(streamHandle)
                 onExclusiveModeChanged(exclusive)
@@ -617,6 +607,7 @@ class OboeAudioSink(
         val handleToClose = streamHandle
         if (handleToClose != 0L) {
             streamHandle = 0L
+            streamGeneration = 0L
             if (currentActiveHandle == handleToClose) {
                 currentActiveHandle = 0L
                 currentStreamInfo = null

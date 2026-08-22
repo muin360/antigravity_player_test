@@ -90,13 +90,17 @@ int32_t AudiophileResampler::process(const float *inData, int32_t inFrames, std:
     int taps = (quality_ == ResampleQuality::SINC_BEST) ? 64 : ((quality_ == ResampleQuality::SINC_FAST) ? 16 : 4);
     int halfTaps = taps / 2;
 
-    // Combine history and current buffer
+    // Combine history and current buffer using preallocated workBuffer_
     int32_t historyFrames = MAX_HISTORY_FRAMES;
-    std::vector<float> workBuffer(historyBuffer_.size() + inFrames * channelCount_);
-    std::copy(historyBuffer_.begin(), historyBuffer_.end(), workBuffer.begin());
-    std::copy(inData, inData + inFrames * channelCount_, workBuffer.begin() + historyBuffer_.size());
-
     int32_t totalWorkFrames = historyFrames + inFrames;
+    int32_t totalWorkSamples = totalWorkFrames * channelCount_;
+    if (static_cast<int32_t>(workBuffer_.size()) < totalWorkSamples) {
+        workBuffer_.resize(totalWorkSamples * 2);
+    }
+
+    std::copy(historyBuffer_.begin(), historyBuffer_.end(), workBuffer_.begin());
+    std::copy(inData, inData + inFrames * channelCount_, workBuffer_.begin() + historyBuffer_.size());
+
     int32_t outFrameCount = 0;
 
     while (timePos_ + halfTaps < inFrames) {
@@ -112,10 +116,10 @@ int32_t AudiophileResampler::process(const float *inData, int32_t inFrames, std:
                 int32_t f2 = std::clamp(baseInFrame + 1, 0, totalWorkFrames - 1);
                 int32_t f3 = std::clamp(baseInFrame + 2, 0, totalWorkFrames - 1);
 
-                double v0 = workBuffer[f0 * channelCount_ + ch];
-                double v1 = workBuffer[f1 * channelCount_ + ch];
-                double v2 = workBuffer[f2 * channelCount_ + ch];
-                double v3 = workBuffer[f3 * channelCount_ + ch];
+                double v0 = workBuffer_[f0 * channelCount_ + ch];
+                double v1 = workBuffer_[f1 * channelCount_ + ch];
+                double v2 = workBuffer_[f2 * channelCount_ + ch];
+                double v3 = workBuffer_[f3 * channelCount_ + ch];
 
                 double a = -0.5 * v0 + 1.5 * v1 - 1.5 * v2 + 0.5 * v3;
                 double b = v0 - 2.5 * v1 + 2.0 * v2 - 0.5 * v3;
@@ -134,7 +138,7 @@ int32_t AudiophileResampler::process(const float *inData, int32_t inFrames, std:
                 double sample = 0.0;
                 for (int t = 0; t < taps; ++t) {
                     int32_t srcFrame = std::clamp(baseInFrame - halfTaps + t, 0, totalWorkFrames - 1);
-                    sample += workBuffer[srcFrame * channelCount_ + ch] * phaseWeights[t];
+                    sample += workBuffer_[srcFrame * channelCount_ + ch] * phaseWeights[t];
                 }
                 outBuffer[outFrameCount * channelCount_ + ch] = static_cast<float>(std::clamp(sample, -1.0, 1.0));
             }
@@ -151,7 +155,7 @@ int32_t AudiophileResampler::process(const float *inData, int32_t inFrames, std:
     for (int32_t f = 0; f < historyFrames; ++f) {
         for (int32_t ch = 0; ch < channelCount_; ++ch) {
             int32_t srcIdx = (copyStartFrame + f) * channelCount_ + ch;
-            historyBuffer_[f * channelCount_ + ch] = (srcIdx < static_cast<int32_t>(workBuffer.size())) ? workBuffer[srcIdx] : 0.0f;
+            historyBuffer_[f * channelCount_ + ch] = (srcIdx < static_cast<int32_t>(workBuffer_.size())) ? workBuffer_[srcIdx] : 0.0f;
         }
     }
 

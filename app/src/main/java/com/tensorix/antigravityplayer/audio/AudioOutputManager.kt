@@ -467,10 +467,15 @@ class AudioOutputManager(private val context: Context) {
         val sampleRates = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) this.sampleRates.toList() else emptyList()
         val channelCounts = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) this.channelCounts.toList() else emptyList()
 
-        val verifiedReport = HardwareHiFiVerifier.probeHardwareState(context)
         val routeType = toRouteType()
-        
-        val directSupport = verifiedReport.isDirectOutputSupported || verifiedReport.isVendorHiFiActive
+        val directSupport = when (routeType) {
+            AudioOutputRouteType.USB_DAC,
+            AudioOutputRouteType.USB_DEVICE,
+            AudioOutputRouteType.WIRED_HEADSET,
+            AudioOutputRouteType.WIRED_HEADPHONES,
+            AudioOutputRouteType.LINE_OUT -> true
+            else -> false
+        }
 
         val name = when {
             !productName.isNullOrBlank() -> productName.toString()

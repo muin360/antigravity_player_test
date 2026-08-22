@@ -43,6 +43,7 @@ private:
 
     double timePos_ = 0.0;
     std::vector<float> historyBuffer_;
+    std::vector<float> workBuffer_;
     static constexpr int32_t MAX_HISTORY_FRAMES = 128;
 
     std::vector<std::vector<double>> polyphaseTable_;

@@ -21,6 +21,17 @@ object OboeBridge {
 
     // Core Stream Lifecycle
     external fun openStream(sampleRate: Int, channelCount: Int, bitPerfectMode: Boolean, deviceId: Int = 0): Long
+    external fun getStreamGeneration(handle: Long): Long
+    external fun writeDirect(
+        handle: Long,
+        generation: Long,
+        directBuffer: java.nio.ByteBuffer,
+        offsetBytes: Int,
+        numBytes: Int,
+        numFrames: Int,
+        pcmEncoding: Int,
+        isBitPerfect: Boolean
+    ): Int
     external fun write(handle: Long, audioData: FloatArray, numFrames: Int): Int
     external fun flushStream(handle: Long)
     external fun pauseStream(handle: Long)

@@ -202,6 +202,7 @@ class PlaybackService : MediaSessionService() {
 
         // Listen to volume changes for DVC using BroadcastReceiver
         volumeReceiver = object : BroadcastReceiver() {
+            private var lastSentDvc = -1.0
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == "android.media.VOLUME_CHANGED_ACTION") {
                     val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
@@ -209,9 +210,12 @@ class PlaybackService : MediaSessionService() {
                     val dvcVol = (currentVolume.toDouble() / maxVolume.toDouble().coerceAtLeast(1.0)).coerceIn(0.0, 1.0)
                     dspProcessor.dvcVolume = dvcVol
                     
-                    val handle = com.tensorix.antigravityplayer.audio.OboeAudioSink.currentActiveHandle
-                    if (handle != 0L && com.tensorix.antigravityplayer.audio.OboeBridge.isAvailable) {
-                        com.tensorix.antigravityplayer.audio.OboeBridge.setDvcVolume(handle, dvcVol)
+                    if (Math.abs(dvcVol - lastSentDvc) > 0.001) {
+                        lastSentDvc = dvcVol
+                        val handle = com.tensorix.antigravityplayer.audio.OboeAudioSink.currentActiveHandle
+                        if (handle != 0L && com.tensorix.antigravityplayer.audio.OboeBridge.isAvailable) {
+                            com.tensorix.antigravityplayer.audio.OboeBridge.setDvcVolume(handle, dvcVol)
+                        }
                     }
                 }
             }
@@ -379,10 +383,10 @@ class PlaybackService : MediaSessionService() {
 
         val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                if (_audioAuxEnabled.value) 15_000 else 30_000, 
-                if (_audioAuxEnabled.value) 30_000 else 60_000, 
-                if (_audioAuxEnabled.value) 500 else 2_000, 
-                if (_audioAuxEnabled.value) 1_000 else 5_000
+                /* minBufferMs = */ 5_000, 
+                /* maxBufferMs = */ if (_audioAuxEnabled.value) 15_000 else 30_000, 
+                /* bufferForPlaybackMs = */ 250, 
+                /* bufferForPlaybackAfterRebufferMs = */ 500
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
