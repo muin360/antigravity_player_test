@@ -22,13 +22,14 @@ enum class ListeningMode(val displayName: String, val badge: String, val descrip
 }
 
 enum class BitPerfectState(val label: String) {
-    DISABLED("Disabled by User"),
+    DISABLED("Bit-Perfect Off"),
     UNAVAILABLE("Not Supported by Hardware/Path"),
-    ELIGIBLE("Eligible (Path supports bit-perfect)"),
-    REQUESTED("Requested (Awaiting verification)"),
-    ACTIVE_UNVERIFIED("Active (Path established, but not verified)"),
-    VERIFIED("Verified (Bit-Perfect playback confirmed)"),
-    FAILED("Failed (Path mismatch or DSP active)"),
+    ELIGIBLE("Direct Path Capable"),
+    REQUESTED("Requested (Awaiting Verification)"),
+    NEGOTIATING("Negotiating Direct Path"),
+    ACTIVE_UNVERIFIED("Direct Path Active (Unverified)"),
+    VERIFIED("Bit-Perfect Verified"),
+    FAILED("Engine Failure"),
     BROKEN("Broken (Internal Error)"),
     UNKNOWN("Unknown State")
 }

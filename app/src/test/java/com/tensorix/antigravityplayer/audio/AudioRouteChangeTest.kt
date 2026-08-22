@@ -32,7 +32,7 @@ class AudioRouteChangeTest {
 
         AudioEngine.reconfigureForRouteChange(context, route)
         assertNull(AudioEngine.snapshot.value)
-        assertEquals(BitPerfectState.UNKNOWN, AudioEngine.getBitPerfectState())
+        assertEquals(BitPerfectState.DISABLED, AudioEngine.getBitPerfectState())
     }
 
     @Test

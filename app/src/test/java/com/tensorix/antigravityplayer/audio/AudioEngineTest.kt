@@ -27,7 +27,7 @@ class AudioEngineTest {
 
     @Test
     fun `test AudioEngine initial state and BitPerfect mode toggle`() {
-        assertEquals(BitPerfectState.UNKNOWN, AudioEngine.getBitPerfectState())
+        assertEquals(BitPerfectState.DISABLED, AudioEngine.getBitPerfectState())
         assertFalse(AudioEngine.bitPerfectRequested.value)
 
         AudioEngine.setBitPerfectMode(true)
@@ -36,7 +36,7 @@ class AudioEngineTest {
 
         AudioEngine.setBitPerfectMode(false)
         assertFalse(AudioEngine.bitPerfectRequested.value)
-        assertEquals(BitPerfectState.UNKNOWN, AudioEngine.getBitPerfectState())
+        assertEquals(BitPerfectState.DISABLED, AudioEngine.getBitPerfectState())
     }
 
     @Test

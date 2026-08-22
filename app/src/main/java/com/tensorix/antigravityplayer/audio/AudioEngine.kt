@@ -41,7 +41,7 @@ object AudioEngine {
     private val _bitPerfectRequested = MutableStateFlow(false)
     val bitPerfectRequested: StateFlow<Boolean> = _bitPerfectRequested.asStateFlow()
 
-    private val _bitPerfectState = MutableStateFlow(BitPerfectState.UNKNOWN)
+    private val _bitPerfectState = MutableStateFlow(BitPerfectState.DISABLED)
     val bitPerfectState: StateFlow<BitPerfectState> = _bitPerfectState.asStateFlow()
 
     private val _recoveryState = MutableStateFlow("NORMAL")
@@ -66,7 +66,7 @@ object AudioEngine {
     fun invalidate() {
         _snapshot.value = null
         if (!_bitPerfectRequested.value) {
-            _bitPerfectState.value = BitPerfectState.UNKNOWN
+            _bitPerfectState.value = BitPerfectState.DISABLED
         }
     }
 
@@ -74,13 +74,13 @@ object AudioEngine {
         _snapshot.value = null
         _activeRoute.value = null
         _bitPerfectRequested.value = false
-        _bitPerfectState.value = BitPerfectState.UNKNOWN
+        _bitPerfectState.value = BitPerfectState.DISABLED
         _recoveryState.value = "NORMAL"
     }
 
     fun setBitPerfectMode(enabled: Boolean) {
         _bitPerfectRequested.value = enabled
-        _bitPerfectState.value = if (enabled) BitPerfectState.REQUESTED else BitPerfectState.UNKNOWN
+        _bitPerfectState.value = if (enabled) BitPerfectState.REQUESTED else BitPerfectState.DISABLED
         invalidate()
     }
 

@@ -17,8 +17,18 @@ object BitPerfectVerifier {
     fun verify(
         snapshot: CanonicalAudioRuntimeSnapshot,
         dspProcessor: Audiophile64BitDspProcessor?,
-        isHrtfEnabled: Boolean
+        isHrtfEnabled: Boolean,
+        isBitPerfectRequested: Boolean = true
     ): BitPerfectVerificationResult {
+        if (!isBitPerfectRequested) {
+            return BitPerfectVerificationResult(
+                state = BitPerfectState.DISABLED,
+                evidence = emptyList(),
+                confidence = Confidence.VERIFIED,
+                failureReasons = emptyList()
+            )
+        }
+
         val evidence = mutableListOf<BitPerfectEvidence>()
         val failureReasons = mutableListOf<String>()
         var hasUnknownOrInferredCritical = false
@@ -285,16 +295,20 @@ object BitPerfectVerifier {
 
         val state = when {
             !eligible -> BitPerfectState.UNAVAILABLE
+            !streamExists || !streamActive -> BitPerfectState.REQUESTED
             allSatisfied && !hasUnknownOrInferredCritical -> BitPerfectState.VERIFIED
             hasUnknownOrInferredCritical && eligible && directActive -> BitPerfectState.ACTIVE_UNVERIFIED
+            failureReasons.isNotEmpty() -> BitPerfectState.UNAVAILABLE
             hasUnknownOrInferredCritical && eligible -> BitPerfectState.UNKNOWN
-            failureReasons.isNotEmpty() -> BitPerfectState.FAILED
             else -> BitPerfectState.UNKNOWN
         }
 
         val confidence = when (state) {
+            BitPerfectState.DISABLED -> Confidence.VERIFIED
             BitPerfectState.VERIFIED -> Confidence.VERIFIED
             BitPerfectState.ACTIVE_UNVERIFIED -> Confidence.HIGH_CONFIDENCE
+            BitPerfectState.UNAVAILABLE -> Confidence.HIGH_CONFIDENCE
+            BitPerfectState.REQUESTED -> Confidence.HIGH_CONFIDENCE
             BitPerfectState.UNKNOWN -> Confidence.UNKNOWN
             else -> Confidence.INFERRED
         }

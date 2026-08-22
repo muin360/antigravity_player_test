@@ -13,11 +13,8 @@ class AudioVerificationEngineTest {
 
     @Test
     fun `test Bit-Perfect VERIFIED when all conditions met`() {
-        // This is a simplified test as mocking Android framework classes like HardwareHiFiVerifier 
-        // (which is an object) might be tricky without PowerMock, 
-        // but I can at least verify the logic flow if I refactor the engine to be more testable.
-        
-        // For now, I'll just verify that the enums are correctly defined.
-        assertEquals("Verified (Bit-Perfect playback confirmed)", BitPerfectState.VERIFIED.label)
+        assertEquals("Bit-Perfect Verified", BitPerfectState.VERIFIED.label)
+        assertEquals("Bit-Perfect Off", BitPerfectState.DISABLED.label)
+        assertEquals("Not Supported by Hardware/Path", BitPerfectState.UNAVAILABLE.label)
     }
 }

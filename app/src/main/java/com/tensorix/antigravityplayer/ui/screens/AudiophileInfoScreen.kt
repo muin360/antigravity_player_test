@@ -210,11 +210,16 @@ fun AudiophileInfoScreen(
         val stateTitle = if (output.bitPerfectState == BitPerfectState.VERIFIED) "BIT-PERFECT"
             else if (output.bitPerfectState == BitPerfectState.ACTIVE_UNVERIFIED) "DIRECT"
             else if (canon?.directPathActive?.value == true) "HI-FI ACTIVE"
+            else if (output.bitPerfectState == BitPerfectState.DISABLED) "NORMAL PLAYBACK"
+            else if (output.bitPerfectState == BitPerfectState.UNAVAILABLE) "STANDARD OUTPUT"
             else "ACTIVE"
         val badgeColor = when (output.bitPerfectState) {
             BitPerfectState.VERIFIED -> Color(0xFFFFD700)
             BitPerfectState.ACTIVE_UNVERIFIED -> Color(0xFFD500F9)
-            BitPerfectState.REQUESTED -> Color(0xFF00B0FF)
+            BitPerfectState.REQUESTED, BitPerfectState.NEGOTIATING -> Color(0xFF00B0FF)
+            BitPerfectState.DISABLED -> Color(0xFF00E5FF)
+            BitPerfectState.UNAVAILABLE -> Color(0xFFFFB74D)
+            BitPerfectState.FAILED, BitPerfectState.BROKEN -> Color.Red
             else -> Color(0xFF00E5FF)
         }
 
@@ -1210,10 +1215,20 @@ private fun BitPerfectStatusBanner(state: BitPerfectState, path: String) {
             PrimaryCyan,
             Brush.horizontalGradient(listOf(PrimaryCyan, SecondaryViolet))
         )
-        BitPerfectState.ACTIVE_UNVERIFIED, BitPerfectState.REQUESTED, BitPerfectState.ELIGIBLE -> Triple(
+        BitPerfectState.ACTIVE_UNVERIFIED, BitPerfectState.REQUESTED, BitPerfectState.NEGOTIATING, BitPerfectState.ELIGIBLE -> Triple(
             PrimaryCyan.copy(alpha = 0.05f),
-            PrimaryCyan.copy(alpha = 0.7f),
+            PrimaryCyan.copy(alpha = 0.8f),
             Brush.horizontalGradient(listOf(PrimaryCyan.copy(alpha = 0.4f), PrimaryCyan.copy(alpha = 0.2f)))
+        )
+        BitPerfectState.DISABLED -> Triple(
+            SurfaceDark,
+            PrimaryCyan,
+            Brush.horizontalGradient(listOf(PrimaryCyan.copy(alpha = 0.3f), SecondaryViolet.copy(alpha = 0.3f)))
+        )
+        BitPerfectState.UNAVAILABLE -> Triple(
+            SurfaceDark,
+            Color(0xFFFFB74D),
+            Brush.horizontalGradient(listOf(Color(0xFFFFB74D).copy(alpha = 0.3f), SurfaceDark))
         )
         BitPerfectState.FAILED, BitPerfectState.BROKEN -> Triple(
             Color.Red.copy(alpha = 0.1f),

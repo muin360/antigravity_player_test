@@ -342,8 +342,11 @@ class AudioOutputManager(private val context: Context) {
         return when (state) {
             BitPerfectState.VERIFIED -> "Bit-Perfect Path ➔ $routeName (Verified)"
             BitPerfectState.ACTIVE_UNVERIFIED -> "Direct Path ➔ $routeName (Unverified)"
-            BitPerfectState.ELIGIBLE -> "Eligible for Bit-Perfect ➔ $routeName"
-            BitPerfectState.REQUESTED -> "Bit-Perfect Requested ➔ $routeName"
+            BitPerfectState.ELIGIBLE -> "Direct Path Capable ➔ $routeName"
+            BitPerfectState.REQUESTED, BitPerfectState.NEGOTIATING -> "Direct Path Requested ➔ $routeName"
+            BitPerfectState.DISABLED -> "Standard Audio Path ➔ $routeName (Bit-Perfect Off)"
+            BitPerfectState.UNAVAILABLE -> "Standard Audio Path ➔ $routeName (Bit-Perfect Unavailable)"
+            BitPerfectState.FAILED, BitPerfectState.BROKEN -> "Standard Audio Path ➔ $routeName (Engine Error)"
             else -> "Standard Android Audio Path ➔ $routeName"
         }
     }

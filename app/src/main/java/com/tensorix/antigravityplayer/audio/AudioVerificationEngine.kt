@@ -236,8 +236,28 @@ object AudioVerificationEngine {
             limitations = hardwareReport.limitations
         )
 
+        val bitPerfectSettingRequested = PlaybackService.instance?.bitPerfectMode?.value ?: AudioEngine.bitPerfectRequested.value
         val hrtfEnabled = PlaybackService.instance?.equalizerEngine?.hrtfSpatialEnabled?.value ?: false
-        val verificationResult = BitPerfectVerifier.verify(preliminarySnapshot, dspProcessor, hrtfEnabled)
+        val verificationResult = BitPerfectVerifier.verify(
+            snapshot = preliminarySnapshot,
+            dspProcessor = dspProcessor,
+            isHrtfEnabled = hrtfEnabled,
+            isBitPerfectRequested = bitPerfectSettingRequested
+        )
+
+        val modeStr = if (bitPerfectSettingRequested) "BIT_PERFECT_ON" else "NORMAL_OFF"
+        val requestedPathStr = if (bitPerfectSettingRequested) "BITPERFECT_DIRECT" else if (isDirectActive) "NORMAL_DIRECT" else "NORMAL_SHARED"
+        val actualPathStr = nativeInfo?.sharingMode ?: if (isDirectActive) "DIRECT" else "SHARED"
+        val routeStr = activeRoute?.routeType?.displayName ?: "UNKNOWN"
+        val dspStr = if (isDspActive) "ACTIVE" else "OFF"
+        val resamplerStr = resamplerStateValue
+        val directStr = if (isDirectActive) "ACTIVE" else "INACTIVE"
+        val mixerStr = if (isMixerActive) "ACTIVE" else "INACTIVE"
+        val verifStr = verificationResult.state.name
+
+        runCatching {
+            android.util.Log.i("AudioEngine", "Snapshot: MODE=$modeStr | REQUESTED_PATH=$requestedPathStr | ACTUAL_PATH=$actualPathStr | ROUTE=$routeStr | DSP=$dspStr | RESAMPLER=$resamplerStr | DIRECT=$directStr | MIXER=$mixerStr | VERIFICATION=$verifStr")
+        }
 
         return preliminarySnapshot.copy(
             bitPerfect = BitPerfectRuntimeState(
